@@ -1,0 +1,472 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+ 
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+enum Role {
+  ADMIN
+  HR
+  MANAGER
+  EMPLOYEE
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  INTERN
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum MaritalStatus {
+  MARRIED
+  UNMARRIED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+model User {
+  id            Int      @id @default(autoincrement())
+  email         String   @unique
+  password      String
+  role          Role
+  isActive      Boolean  @default(true)
+
+  refreshToken  String? 
+
+  employee      Employee?
+
+  resetOtp        String?
+  resetOtpExpires DateTime?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+
+model Employee {
+  id          Int    @id @default(autoincrement())
+  userId      Int    @unique
+
+  empCode     String @unique
+  firstName   String
+  lastName    String
+  department  String
+  designation String
+
+  isExperienced Boolean  @default(false)
+
+  // NEW FIELDS
+  employmentType EmploymentType?
+  status         EmployeeStatus @default(ACTIVE)
+  sourceOfHire   String?
+
+  dateOfJoining DateTime?
+
+  currentExperience Float?
+
+  reportingManager String?
+
+  dateOfBirth DateTime?
+  age         Int?
+  gender      Gender?
+
+  currentAddress   String?
+  permanentAddress String?
+
+  pincode String?
+  city    String?
+
+  maritalStatus MaritalStatus?
+
+  phone String?
+
+  workMode WorkMode @default(OFFICE)
+
+  personalMobile String?
+
+  dateOfExit DateTime?
+
+  panNumber    String?
+  aadharNumber String?
+  pfNumber     String?
+  uanNumber    String?
+
+  bankAccountNumber String?
+  bankName          String?
+  ifscCode          String?
+
+  addedBy String?
+
+  user        User   @relation(fields: [userId], references: [id])
+
+  attendances Attendance[]
+  logs        AttendanceLog[]
+  wfhRequests WFHRequest[]
+  leaves      Leave[]
+  leaveBalances  LeaveBalance[]
+  documents   EmployeeDocument[]
+  payrolls    Payroll[]
+  salaries    EmployeeSalary[]
+
+  createdAt   DateTime @default(now())
+}
+
+
+enum AttendanceStatus {
+  PRESENT
+  HALF_DAY
+  ABSENT
+}
+
+enum PunchType {
+  IN
+  OUT
+}
+
+enum LocationStatus {
+  OFFICE
+  OUTSIDE
+  WFH
+}
+
+model OfficeLocation {
+  id        Int     @id @default(autoincrement())
+  name      String
+  latitude  Float
+  longitude Float
+  radius    Float
+  createdAt DateTime @default(now())
+}
+
+model Attendance {
+  id            Int      @id @default(autoincrement())
+  employeeId    Int
+  date          DateTime
+
+  punchIn       DateTime?
+  punchOut      DateTime?
+
+  punchInLat    Float?
+  punchInLng    Float?
+
+  punchOutLat   Float?
+  punchOutLng   Float?
+
+  locationStatus LocationStatus?
+
+  totalHours    Float    @default(0)
+  overtime      Float    @default(0)
+
+  status        AttendanceStatus @default(PRESENT)
+  isAutoClosed  Boolean  @default(false)
+
+  employee      Employee @relation(fields: [employeeId], references: [id])
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([employeeId, date])
+}
+
+model AttendanceLog {
+  id          Int      @id @default(autoincrement())
+  employeeId  Int
+  type        PunchType
+  time        DateTime @default(now())
+
+  employee    Employee @relation(fields: [employeeId], references: [id])
+}
+
+
+enum WorkMode {
+  OFFICE
+  WFH
+  REMOTE
+}
+
+enum WFHStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+
+model WFHRequest {
+  id         Int       @id @default(autoincrement())
+  employeeId Int
+  startDate  DateTime
+  endDate    DateTime
+  status     WFHStatus @default(PENDING)
+
+  reason     String?   // ✅ Added optional reason column
+
+  employee   Employee  @relation(fields: [employeeId], references: [id])
+  createdAt  DateTime  @default(now())
+}
+
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum LeaveDurationType {
+  FULL_DAY
+  HALF_DAY_FIRST
+  HALF_DAY_SECOND
+}
+
+model LeaveType {
+  id            Int     @id @default(autoincrement())
+  name          String  @unique
+  yearlyQuota   Float
+  monthlyAccrual Float? // optional
+  carryForward  Boolean @default(false)
+  maxCarryLimit Float?
+
+  leaves        Leave[]
+  balances      LeaveBalance[]
+}
+
+
+model LeaveBalance {
+  id            Int   @id @default(autoincrement())
+
+  employeeId    Int
+  leaveTypeId   Int
+  yearStart     Int
+
+  allocated     Float @default(0)
+  used          Float @default(0)
+  carryForward  Float @default(0)
+
+  employee      Employee @relation(fields: [employeeId], references: [id])
+  leaveType     LeaveType @relation(fields: [leaveTypeId], references: [id])
+
+  @@unique([employeeId, leaveTypeId, yearStart])
+}
+
+
+model Leave {
+  id              Int @id @default(autoincrement())
+
+  employeeId      Int
+  leaveTypeId     Int
+  yearStart       Int
+
+  startDate       DateTime
+  endDate         DateTime
+  durationType    LeaveDurationType @default(FULL_DAY)
+
+  totalDays       Float
+  reason          String
+
+  status          LeaveStatus @default(PENDING)
+  remarks         String?
+
+  employee        Employee @relation(fields: [employeeId], references: [id])
+  leaveType       LeaveType @relation(fields: [leaveTypeId], references: [id])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([employeeId])
+  @@index([yearStart])
+}
+
+
+model Holiday {
+  id          Int      @id @default(autoincrement())
+  name        String
+  date        DateTime
+  description String?
+  isOptional  Boolean  @default(false)
+  location    String?
+
+  createdAt   DateTime @default(now())
+
+  @@unique([date, location])
+  @@index([date])
+}
+
+
+enum DocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model DocumentType {
+  id             Int      @id @default(autoincrement())
+  name           String   @unique
+  isMandatory    Boolean  @default(false)
+  forFresher     Boolean  @default(true)
+  forExperienced Boolean  @default(true)
+
+  documents      EmployeeDocument[]
+}
+
+model EmployeeDocument {
+  id             Int            @id @default(autoincrement())
+
+  employeeId     Int
+  documentTypeId Int
+
+  fileName       String
+  mimeType       String
+  fileData       Bytes
+
+  status         DocumentStatus @default(PENDING)
+  remarks        String?
+
+  verifiedBy     Int?
+  verifiedAt     DateTime?
+
+  uploadedAt     DateTime       @default(now())
+
+  employee       Employee       @relation(fields: [employeeId], references: [id])
+  documentType   DocumentType   @relation(fields: [documentTypeId], references: [id])
+
+  @@unique([employeeId, documentTypeId])
+  @@index([employeeId])
+}
+
+
+
+
+enum PayrollStatus {
+  DRAFT
+  FINALIZED
+  PAID
+}
+
+enum AdjustmentType {
+  ALLOWANCE
+  DEDUCTION
+}
+
+model SalaryStructure {
+
+  id Int @id @default(autoincrement())
+
+  name String
+
+  basicPercent Float @default(40)
+
+  hraPercent Float @default(20)
+
+  pfPercent Float @default(12)
+
+  ptAmount Float @default(200)
+
+  healthInsurance Float @default(0)
+
+  createdAt DateTime @default(now())
+
+  salaries EmployeeSalary[]
+}
+
+model EmployeeSalary {
+
+  id Int @id @default(autoincrement())
+
+  employeeId Int
+  structureId Int
+
+  annualCTC Float
+  monthlyCTC Float
+
+  effectiveFrom DateTime
+
+  employee Employee @relation(fields:[employeeId],references:[id])
+
+  structure SalaryStructure @relation(fields:[structureId],references:[id])
+
+  payrolls Payroll[]
+
+  @@index([employeeId])
+}
+
+model Payroll {
+
+  id Int @id @default(autoincrement())
+
+  employeeId Int
+  salaryId Int
+
+  month Int
+  year Int
+
+  workingDays Int
+  presentDays Float
+  lopDays Float
+
+  /* Earnings */
+
+  basic Float
+  hra Float
+  specialAllowance Float @default(0)
+  otherAllowance Float @default(0)
+
+  /* Deductions */
+
+  pf Float
+  pt Float
+  leaveDeduction Float @default(0)
+
+  /* Totals */
+
+  grossSalary Float
+  deductions Float
+  netSalary Float
+
+  status PayrollStatus @default(DRAFT)
+
+  createdAt DateTime @default(now())
+
+  employee Employee @relation(fields:[employeeId],references:[id])
+  salary EmployeeSalary @relation(fields:[salaryId],references:[id])
+
+  others PayrollAdjustment[]
+
+  @@unique([employeeId,month,year])
+}
+
+model PayrollAdjustment {
+
+  id Int @id @default(autoincrement())
+
+  payrollId Int
+
+  name String
+
+  type AdjustmentType
+
+  amount Float
+
+  createdAt DateTime @default(now())
+
+  payroll Payroll @relation(fields:[payrollId],references:[id])
+}
