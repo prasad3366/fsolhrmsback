@@ -1,11 +1,15 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { EmployeesService } from '../employees/employees.service';
 import { RunPayrollDto } from './dto/run-payroll.dto';
 import { PayrollCalculator } from './payroll.calculator';
 
 @Injectable()
 export class PayrollService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private employeesService: EmployeesService,
+  ) {}
 
   /* 🔥 Working Days Calculator */
 
@@ -35,9 +39,14 @@ export class PayrollService {
   /* 🔥 MAIN PAYROLL */
 
   async runPayroll(data: RunPayrollDto) {
-    const employeeId = Number(data.employeeId);
+    let employeeId = data.employeeId ? Number(data.employeeId) : undefined;
     const month = Number(data.month);
     const year = Number(data.year);
+
+    if (!employeeId && data.empCode) {
+      const employee = await this.employeesService.findByEmpCode(data.empCode);
+      employeeId = employee.id;
+    }
 
     if (!employeeId || !month || !year) {
       throw new BadRequestException('Invalid payroll request');

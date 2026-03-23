@@ -1,9 +1,14 @@
-import { IsInt, Min } from 'class-validator';
+import { IsInt, Min, IsOptional, IsString } from 'class-validator';
 
 export class RunPayrollDto {
   @IsInt()
   @Min(1)
-  employeeId: number;
+  @IsOptional()
+  employeeId?: number;
+
+  @IsString()
+  @IsOptional()
+  empCode?: string;
 
   @IsInt()
   @Min(1)

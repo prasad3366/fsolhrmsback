@@ -3,13 +3,12 @@ import { SalaryController } from './salary.controller';
 import { SalaryService } from './salary.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmployeesModule } from '../employees/employees.module';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../common/guards/roles.guard';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
-  imports: [EmployeesModule],
+  imports: [EmployeesModule, AuthModule],
   controllers: [SalaryController],
 
-  providers: [SalaryService, PrismaService, JwtAuthGuard, RolesGuard],
+  providers: [SalaryService, PrismaService],
 })
 export class SalaryModule {}

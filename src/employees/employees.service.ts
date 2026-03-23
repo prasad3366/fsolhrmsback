@@ -98,7 +98,7 @@ export class EmployeesService {
       },
     });
 
-    await this.mailService.sendEmployeeCredentials(dto.email, rawPassword);
+    await this.mailService.sendEmployeeCredentials(dto.email, rawPassword, dto.firstName);
 
     return {
       message: 'Employee created successfully',
