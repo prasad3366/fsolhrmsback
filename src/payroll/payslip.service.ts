@@ -1,29 +1,27 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import { PrismaService } from "../prisma/prisma.service";
-import { Response } from "express";
-import * as puppeteer from "puppeteer";
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { Response } from 'express';
+import * as puppeteer from 'puppeteer';
 
 @Injectable()
 export class PayslipService {
+  constructor(private prisma: PrismaService) {}
 
-constructor(private prisma: PrismaService) {}
+  async generatePayslip(payrollId: number, res: Response) {
+    const payroll = await this.prisma.payroll.findUnique({
+      where: { id: payrollId },
+      include: { employee: true },
+    });
 
-async generatePayslip(payrollId:number,res:Response){
+    if (!payroll) {
+      throw new NotFoundException('Payroll not found');
+    }
 
-const payroll = await this.prisma.payroll.findUnique({
-where:{ id: payrollId },
-include:{ employee:true }
-})
+    const emp = payroll.employee;
 
-if(!payroll){
-throw new NotFoundException("Payroll not found")
-}
+    /* HTML TEMPLATE */
 
-const emp = payroll.employee
-
-/* HTML TEMPLATE */
-
-const html = `
+    const html = `
 <html>
 <head>
 <style>
@@ -85,42 +83,42 @@ Salary Slip
 
 <tr>
 <td><b>Employee Code</b></td>
-<td>${emp?.empCode || ""}</td>
+<td>${emp?.empCode || ''}</td>
 
 <td><b>Name</b></td>
-<td>${emp?.firstName || ""} ${emp?.lastName || ""}</td>
+<td>${emp?.firstName || ''} ${emp?.lastName || ''}</td>
 </tr>
 
 <tr>
 <td><b>Department</b></td>
-<td>${emp?.department || ""}</td>
+<td>${emp?.department || ''}</td>
 
 <td><b>Designation</b></td>
-<td>${emp?.designation || ""}</td>
+<td>${emp?.designation || ''}</td>
 </tr>
 
 <tr>
 <td><b>Date Of Joining</b></td>
-<td>${emp?.dateOfJoining ? new Date(emp.dateOfJoining).toLocaleDateString() : ""}</td>
+<td>${emp?.dateOfJoining ? new Date(emp.dateOfJoining).toLocaleDateString() : ''}</td>
 
 <td><b>PF Number</b></td>
-<td>${emp?.pfNumber || ""}</td>
+<td>${emp?.pfNumber || ''}</td>
 </tr>
 
 <tr>
 <td><b>UAN Number</b></td>
-<td>${emp?.uanNumber || ""}</td>
+<td>${emp?.uanNumber || ''}</td>
 
 <td><b>PAN</b></td>
-<td>${emp?.panNumber || ""}</td>
+<td>${emp?.panNumber || ''}</td>
 </tr>
 
 <tr>
 <td><b>Bank Name</b></td>
-<td>${emp?.bankName || ""}</td>
+<td>${emp?.bankName || ''}</td>
 
 <td><b>Account Number</b></td>
-<td>${emp?.bankAccountNumber || ""}</td>
+<td>${emp?.bankAccountNumber || ''}</td>
 </tr>
 
 </table>
@@ -202,28 +200,26 @@ Salary Slip
 
 </body>
 </html>
-`
+`;
 
-/* GENERATE PDF */
+    /* GENERATE PDF */
 
-const browser = await puppeteer.launch()
+    const browser = await puppeteer.launch();
 
-const page = await browser.newPage()
+    const page = await browser.newPage();
 
-await page.setContent(html)
+    await page.setContent(html);
 
-const pdf = await page.pdf({
-format:"A4",
-printBackground:true
-})
+    const pdf = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+    });
 
-await browser.close()
+    await browser.close();
 
-res.setHeader("Content-Type","application/pdf")
-res.setHeader("Content-Disposition","attachment; filename=payslip.pdf")
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename=payslip.pdf');
 
-res.send(pdf)
-
-}
-
+    res.send(pdf);
+  }
 }

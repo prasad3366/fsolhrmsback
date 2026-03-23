@@ -1,168 +1,224 @@
-import { Injectable, BadRequestException } from "@nestjs/common"
-import { PrismaService } from "../prisma/prisma.service"
-import { RunPayrollDto } from "./dto/run-payroll.dto"
-import { PayrollCalculator } from "./payroll.calculator"
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { RunPayrollDto } from './dto/run-payroll.dto';
+import { PayrollCalculator } from './payroll.calculator';
 
 @Injectable()
 export class PayrollService {
+  constructor(private prisma: PrismaService) {}
 
-constructor(private prisma: PrismaService) {}
+  /* 🔥 Working Days Calculator */
 
-async runPayroll(data: RunPayrollDto) {
+  calculateWorkingDays(startDate: Date, endDate: Date, holidays: Date[]) {
+    let workingDays = 0;
 
-const employeeId = Number(data.employeeId)
-const month = Number(data.month)
-const year = Number(data.year)
+    for (
+      let d = new Date(startDate);
+      d <= endDate;
+      d.setDate(d.getDate() + 1)
+    ) {
+      const day = d.getDay();
+      const isWeekend = day === 0 || day === 6;
 
-if (!employeeId || !month || !year) {
-throw new BadRequestException("Invalid payroll request data")
-}
+      const isHoliday = holidays.some(
+        (h) => h.toDateString() === d.toDateString(),
+      );
 
-/* Salary configuration */
+      if (!isWeekend && !isHoliday) {
+        workingDays++;
+      }
+    }
 
-const salary = await this.prisma.employeeSalary.findFirst({
-where: { employeeId },
-include: { structure: true }
-})
+    return workingDays;
+  }
 
-if (!salary) {
-throw new BadRequestException("Salary not configured for this employee")
-}
+  /* 🔥 MAIN PAYROLL */
 
-/* Month date range */
+  async runPayroll(data: RunPayrollDto) {
+    const employeeId = Number(data.employeeId);
+    const month = Number(data.month);
+    const year = Number(data.year);
 
-const startDate = new Date(year, month - 1, 1)
-const endDate = new Date(year, month, 0)
+    if (!employeeId || !month || !year) {
+      throw new BadRequestException('Invalid payroll request');
+    }
 
-if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-throw new BadRequestException("Invalid month or year")
-}
+    /* Salary */
 
-/* Prevent duplicate payroll */
+    const salary = await this.prisma.employeeSalary.findFirst({
+      where: { employeeId },
+      include: { structure: true },
+    });
 
-const existingPayroll = await this.prisma.payroll.findFirst({
-where: {
-employeeId,
-month,
-year
-}
-})
+    if (!salary) {
+      throw new BadRequestException('Salary not configured');
+    }
 
-if (existingPayroll) {
-throw new BadRequestException("Payroll already generated for this month")
-}
+    /* Date Range */
 
-/* Attendance calculation */
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0);
 
-const workingDays = 22
+    /* Prevent duplicate */
 
-const presentDays = await this.prisma.attendance.count({
-where: {
-employeeId,
-status: "PRESENT",
-date: {
-gte: startDate,
-lte: endDate
-}
-}
-})
+    const existing = await this.prisma.payroll.findFirst({
+      where: { employeeId, month, year },
+    });
 
-const absentDays = await this.prisma.attendance.count({
-where: {
-employeeId,
-status: "ABSENT",
-date: {
-gte: startDate,
-lte: endDate
-}
-}
-})
+    if (existing) {
+      throw new BadRequestException('Payroll already exists');
+    }
 
-/* Payroll calculation */
+    /* 🔥 Holidays */
 
-const calc = PayrollCalculator.calculate(
-salary.monthlyCTC,
-salary.structure,
-workingDays,
-presentDays
-)
+    const holidayData = await this.prisma.holiday.findMany({
+      where: {
+        date: { gte: startDate, lte: endDate },
+      },
+    });
 
-/* Save payroll */
+    const holidays = holidayData.map((h) => h.date);
 
-return this.prisma.payroll.create({
-data: {
+    /* 🔥 Working Days */
 
-employeeId,
-salaryId: salary.id,
+    const workingDays = this.calculateWorkingDays(startDate, endDate, holidays);
 
-month,
-year,
+    /* 🔥 Attendance */
 
-workingDays,
-presentDays,
-lopDays: absentDays,
+    const attendanceRecords = await this.prisma.attendance.findMany({
+      where: {
+        employeeId,
+        date: { gte: startDate, lte: endDate },
+      },
+    });
 
-/* Earnings */
+    let presentDays = 0;
 
-basic: calc.basic,
-hra: calc.hra,
-specialAllowance: calc.specialAllowance,
-otherAllowance: calc.otherAllowance,
+    for (const att of attendanceRecords) {
+      if (att.status === 'PRESENT') presentDays += 1;
+      if (att.status === 'HALF_DAY') presentDays += 0.5;
+    }
 
-/* Deductions */
+    /* 🔥 Approved Leaves */
 
-pf: calc.pf,
-pt: calc.pt,
-leaveDeduction: calc.leaveDeduction,
+    const leaves = await this.prisma.leave.findMany({
+      where: {
+        employeeId,
+        status: 'APPROVED',
+        startDate: { lte: endDate },
+        endDate: { gte: startDate },
+      },
+    });
 
-/* Totals */
+    let approvedLeaveDays = 0;
 
-grossSalary: calc.gross,
-deductions: calc.deductions,
-netSalary: calc.netSalary
+    for (const leave of leaves) {
+      approvedLeaveDays += leave.totalDays;
+    }
 
-}
-})
+    /* 🔥 FINAL LOGIC */
 
-}
+    const payableDays = presentDays + approvedLeaveDays;
 
-/* Manual adjustments */
+    const lopDays = Math.max(workingDays - payableDays, 0);
 
-async addOther(
-payrollId: number,
-name: string,
-type: "ALLOWANCE" | "DEDUCTION",
-amount: number
-) {
+    /* 🔥 Calculation */
 
-if (!payrollId || !name || !amount) {
-throw new BadRequestException("Invalid adjustment data")
-}
+    const calc = PayrollCalculator.calculate(
+      salary.monthlyCTC,
+      salary.structure,
+      workingDays,
+      lopDays,
+    );
 
-return this.prisma.payrollAdjustment.create({
-data: {
-payrollId,
-name,
-type,
-amount
-}
-})
-}
+    /* SAVE */
 
-/* Get payroll history */
+    return this.prisma.payroll.create({
+      data: {
+        employeeId,
+        salaryId: salary.id,
 
-async getPayroll(employeeId: number) {
+        month,
+        year,
 
-return this.prisma.payroll.findMany({
-where: { employeeId: Number(employeeId) },
-include: {
-others: true,
-employee: true
-},
-orderBy: {
-createdAt: "desc"
-}
-})
-}
+        workingDays,
+        presentDays,
+        lopDays,
 
+        basic: calc.basic,
+        hra: calc.hra,
+        specialAllowance: calc.specialAllowance,
+        otherAllowance: calc.otherAllowance,
+
+        pf: calc.pf,
+        pt: calc.pt,
+        leaveDeduction: calc.leaveDeduction,
+
+        grossSalary: calc.gross,
+        deductions: calc.deductions,
+        netSalary: calc.netSalary,
+      },
+    });
+  }
+
+  /* HR UPDATE */
+
+  async updatePayroll(payrollId: number, data: any) {
+    return this.prisma.payroll.update({
+      where: { id: payrollId },
+      data,
+    });
+  }
+
+  /* GET PAYROLL FOR EMPLOYEE */
+
+  async getPayroll(employeeId: number) {
+    if (!employeeId) {
+      throw new BadRequestException('Invalid employee ID');
+    }
+
+    return this.prisma.payroll.findMany({
+      where: { employeeId },
+      include: { salary: true },
+      orderBy: [
+        { year: 'desc' },
+        { month: 'desc' },
+      ],
+    });
+  }
+
+  /* ADD ALLOWANCE OR DEDUCTION */
+
+  async addOther(
+    payrollId: number,
+    name: string,
+    type: 'ALLOWANCE' | 'DEDUCTION',
+    amount: number,
+  ) {
+    if (!payrollId || !name || !amount) {
+      throw new BadRequestException('Invalid adjustment data');
+    }
+
+    const payroll = await this.prisma.payroll.findUnique({
+      where: { id: payrollId },
+    });
+
+    if (!payroll) {
+      throw new BadRequestException('Payroll not found');
+    }
+
+    const newDeductions =
+      payroll.deductions + (type === 'DEDUCTION' ? amount : 0);
+    const newGross = payroll.grossSalary + (type === 'ALLOWANCE' ? amount : 0);
+    const newNet = newGross - newDeductions;
+
+    return this.prisma.payroll.update({
+      where: { id: payrollId },
+      data: {
+        grossSalary: newGross,
+        deductions: newDeductions,
+        netSalary: newNet,
+      },
+    });
+  }
 }

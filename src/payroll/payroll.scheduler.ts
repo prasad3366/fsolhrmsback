@@ -1,124 +1,138 @@
-import { Injectable } from "@nestjs/common"
-import { Cron } from "@nestjs/schedule"
-import { PrismaService } from "../prisma/prisma.service"
-import { PayrollCalculator } from "./payroll.calculator"
+import { Injectable } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import { PrismaService } from '../prisma/prisma.service';
+import { PayrollCalculator } from './payroll.calculator';
 
 @Injectable()
 export class PayrollScheduler {
+  constructor(private prisma: PrismaService) {}
 
-constructor(private prisma: PrismaService) {}
+  @Cron('0 0 1 * *')
+  async autoGeneratePayroll() {
+    const now = new Date();
+    const month = now.getMonth() + 1;
+    const year = now.getFullYear();
 
-@Cron("0 0 1 * *") // Runs on 1st day of every month
-async autoGeneratePayroll() {
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0);
 
-const now = new Date()
+    const employees = await this.prisma.employee.findMany({
+      include: {
+        salaries: { include: { structure: true } },
+      },
+    });
 
-const month = now.getMonth() + 1
-const year = now.getFullYear()
+    for (const emp of employees) {
+      const salary = emp.salaries?.[0];
+      if (!salary) continue;
 
-const startDate = new Date(year, month - 1, 1)
-const endDate = new Date(year, month, 0)
+      const existing = await this.prisma.payroll.findFirst({
+        where: { employeeId: emp.id, month, year },
+      });
+      if (existing) continue;
 
-const employees = await this.prisma.employee.findMany({
-include:{
-salaries:{
-include:{ structure:true }
-}
-}
-})
+      /* Holidays */
 
-for(const emp of employees){
+      const holidayData = await this.prisma.holiday.findMany({
+        where: {
+          date: { gte: startDate, lte: endDate },
+        },
+      });
 
-const salary = emp.salaries[0]
+      const holidays = holidayData?.map((h) => h.date) || [];
 
-if(!salary) continue
+      /* Working Days */
 
-/* Prevent duplicate payroll */
+      let workingDays = 0;
 
-const existing = await this.prisma.payroll.findFirst({
-where:{
-employeeId: emp.id,
-month,
-year
-}
-})
+      for (
+        let d = new Date(startDate);
+        d <= endDate;
+        d.setDate(d.getDate() + 1)
+      ) {
+        const day = d.getDay();
+        const isWeekend = day === 0 || day === 6;
 
-if(existing) continue
+        const isHoliday = holidays.some(
+          (h) => h.toDateString() === d.toDateString(),
+        );
 
-/* Attendance calculation */
+        if (!isWeekend && !isHoliday) workingDays++;
+      }
 
-const presentDays = await this.prisma.attendance.count({
-where:{
-employeeId: emp.id,
-status: "PRESENT",
-date:{
-gte:startDate,
-lte:endDate
-}
-}
-})
+      /* Attendance */
 
-const absentDays = await this.prisma.attendance.count({
-where:{
-employeeId: emp.id,
-status:"ABSENT",
-date:{
-gte:startDate,
-lte:endDate
-}
-}
-})
+      const attendanceRecords = await this.prisma.attendance.findMany({
+        where: {
+          employeeId: emp.id,
+          date: { gte: startDate, lte: endDate },
+        },
+      });
 
-const workingDays = 22
+      let presentDays = 0;
 
-/* Payroll calculation */
+      for (const att of attendanceRecords) {
+        if (att?.status === 'PRESENT') presentDays += 1;
+        if (att?.status === 'HALF_DAY') presentDays += 0.5;
+      }
 
-const calc = PayrollCalculator.calculate(
-salary.monthlyCTC,
-salary.structure,
-workingDays,
-presentDays
-)
+      /* Leaves */
 
-/* Save payroll */
+      const leaves = await this.prisma.leave.findMany({
+        where: {
+          employeeId: emp.id,
+          status: 'APPROVED',
+          startDate: { lte: endDate },
+          endDate: { gte: startDate },
+        },
+      });
 
-await this.prisma.payroll.create({
-data:{
+      let approvedLeaveDays = 0;
 
-employeeId: emp.id,
-salaryId: salary.id,
+      for (const leave of leaves) {
+        approvedLeaveDays += leave?.totalDays || 0;
+      }
 
-month,
-year,
+      /* Final */
 
-workingDays,
-presentDays,
-lopDays: absentDays,
+      const payableDays = presentDays + approvedLeaveDays;
+      const lopDays = Math.max(workingDays - payableDays, 0);
 
-/* Earnings */
+      /* Calc */
 
-basic: calc.basic,
-hra: calc.hra,
-specialAllowance: calc.specialAllowance,
-otherAllowance: calc.otherAllowance,
+      const calc = PayrollCalculator.calculate(
+        salary.monthlyCTC,
+        salary.structure,
+        workingDays,
+        lopDays,
+      );
 
-/* Deductions */
+      /* Save */
 
-pf: calc.pf,
-pt: calc.pt,
-leaveDeduction: calc.leaveDeduction,
+      await this.prisma.payroll.create({
+        data: {
+          employeeId: emp.id,
+          salaryId: salary.id,
+          month,
+          year,
+          workingDays,
+          presentDays,
+          lopDays,
 
-/* Totals */
+          basic: calc.basic,
+          hra: calc?.hra || 0,
+          specialAllowance: calc?.specialAllowance || 0,
+          otherAllowance: calc?.otherAllowance || 0,
 
-grossSalary: calc.gross,
-deductions: calc.deductions,
-netSalary: calc.netSalary
+          pf: calc?.pf || 0,
+          pt: calc?.pt || 0,
+          leaveDeduction: calc?.leaveDeduction || 0,
 
-}
-})
-
-}
-
-}
-
+          grossSalary: calc?.gross || 0,
+          deductions: calc?.deductions || 0,
+          netSalary: calc?.netSalary || 0,
+        },
+      });
+    }
+  }
 }

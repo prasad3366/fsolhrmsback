@@ -1,83 +1,47 @@
 export class PayrollCalculator {
+  static calculate(
+    ctc: number,
+    structure: any,
+    workingDays: number,
+    lopDays: number,
+  ) {
+    /* EARNINGS */
 
-static calculate(
-ctc:number,
-structure:any,
-workingDays:number,
-presentDays:number
-){
+    const basic = (ctc * structure.basicPercent) / 100;
+    const hra = (basic * structure.hraPercent) / 100;
+    const specialAllowance = (ctc * structure.specialPercent) / 100;
 
-/* LEAVE CALCULATION */
+    const otherAllowance = ctc - (basic + hra + specialAllowance);
 
-const lopDays = workingDays - presentDays
+    const gross = basic + hra + specialAllowance + otherAllowance;
 
-/* EARNINGS */
+    /* DEDUCTIONS */
 
-// Basic Salary (ex: 40% of CTC)
-const basic = (ctc * structure.basicPercent) / 100
+    const pf = (basic * structure.pfPercent) / 100;
+    const pt = structure.ptAmount;
 
-// HRA (ex: 40% of Basic)
-const hra = (basic * structure.hraPercent) / 100
+    const perDaySalary = gross / workingDays;
 
-// Special Allowance (ex: 20% of CTC)
-const specialAllowance = (ctc * structure.specialPercent) / 100
+    const leaveDeduction = lopDays * perDaySalary;
 
-// Other Allowance (remaining salary)
-const otherAllowance =
-ctc - (basic + hra + specialAllowance)
+    const deductions = pf + pt + leaveDeduction;
 
-// Gross Salary
-const gross =
-basic +
-hra +
-specialAllowance +
-otherAllowance
+    const netSalary = gross - deductions;
 
+    return {
+      basic,
+      hra,
+      specialAllowance,
+      otherAllowance,
+      gross,
 
-/* DEDUCTIONS */
+      pf,
+      pt,
+      lopDays,
+      leaveDeduction,
 
-// PF (12% of Basic)
-const pf = (basic * structure.pfPercent) / 100
-
-// Professional Tax
-const pt = structure.ptAmount
-
-// Per Day Salary
-const perDaySalary = gross / workingDays
-
-// Leave Deduction
-const leaveDeduction = lopDays * perDaySalary
-
-// Total Deductions
-const deductions =
-pf +
-pt +
-leaveDeduction
-
-
-/* NET SALARY */
-
-const netSalary = gross - deductions
-
-return {
-
-basic,
-hra,
-specialAllowance,
-otherAllowance,
-
-gross,
-
-pf,
-pt,
-lopDays,
-leaveDeduction,
-
-deductions,
-netSalary
-
-}
-
-}
-
+      deductions,
+      netSalary,
+    };
+  }
 }

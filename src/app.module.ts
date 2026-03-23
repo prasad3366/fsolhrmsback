@@ -15,7 +15,6 @@ import { DocumentsModule } from './documents/documents.module';
 import { PayrollModule } from './payroll/payroll.module';
 import { SalaryModule } from './salary/salary.module';
 
-
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -26,16 +25,13 @@ import { SalaryModule } from './salary/salary.module';
     AuthModule,
     EmployeesModule,
     AttendanceModule,
-    WfhModule, 
+    WfhModule,
     LeaveModule,
     HolidaysModule,
     DocumentsModule,
     PayrollModule,
-    SalaryModule
+    SalaryModule,
   ],
-  providers: [
-    PrismaService,
-    WfhScheduler,
-  ],
+  providers: [PrismaService, WfhScheduler],
 })
 export class AppModule {}

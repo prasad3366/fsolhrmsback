@@ -29,8 +29,7 @@ export class AttendanceService {
     lat?: number,
     lng?: number,
   ) {
-
-    if (lat === undefined || lng === undefined) return "OUTSIDE";
+    if (lat === undefined || lng === undefined) return 'OUTSIDE';
 
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
@@ -47,25 +46,19 @@ export class AttendanceService {
       },
     });
 
-    if (wfh) return "WFH";
+    if (wfh) return 'WFH';
 
     const office = await this.prisma.officeLocation.findFirst();
 
-    if (!office) return "OUTSIDE";
+    if (!office) return 'OUTSIDE';
 
-    const dist = distanceMeters(
-      lat,
-      lng,
-      office.latitude,
-      office.longitude,
-    );
+    const dist = distanceMeters(lat, lng, office.latitude, office.longitude);
 
-    return dist <= office.radius ? "OFFICE" : "OUTSIDE";
+    return dist <= office.radius ? 'OFFICE' : 'OUTSIDE';
   }
 
   // ⭐ PUNCH IN
   async punchIn(employeeId: number, lat?: number, lng?: number) {
-
     const date = this.today();
 
     const holiday = await this.holidayService.isHoliday(date);
@@ -90,14 +83,9 @@ export class AttendanceService {
       where: { employeeId_date: { employeeId, date } },
     });
 
-    if (record?.punchIn)
-      throw new BadRequestException('Already punched in');
+    if (record?.punchIn) throw new BadRequestException('Already punched in');
 
-    const locationStatus = await this.getLocationStatus(
-      employeeId,
-      lat,
-      lng,
-    );
+    const locationStatus = await this.getLocationStatus(employeeId, lat, lng);
 
     await this.prisma.attendanceLog.create({
       data: { employeeId, type: PunchType.IN },
@@ -124,23 +112,19 @@ export class AttendanceService {
 
   // ⭐ PUNCH OUT
   async punchOut(employeeId: number, lat?: number, lng?: number) {
-
     const date = this.today();
 
     const record = await this.prisma.attendance.findUnique({
       where: { employeeId_date: { employeeId, date } },
     });
 
-    if (!record?.punchIn)
-      throw new BadRequestException('Punch in first');
+    if (!record?.punchIn) throw new BadRequestException('Punch in first');
 
-    if (record.punchOut)
-      throw new BadRequestException('Already punched out');
+    if (record.punchOut) throw new BadRequestException('Already punched out');
 
     const out = new Date();
 
-    const hours =
-      (out.getTime() - record.punchIn.getTime()) / 3600000;
+    const hours = (out.getTime() - record.punchIn.getTime()) / 3600000;
 
     await this.prisma.attendanceLog.create({
       data: { employeeId, type: PunchType.OUT },
@@ -186,8 +170,7 @@ export class AttendanceService {
       where: { userId },
     });
 
-    if (!employee)
-      throw new BadRequestException('Employee not found');
+    if (!employee) throw new BadRequestException('Employee not found');
 
     return this.prisma.attendance.findMany({
       where: { employeeId: employee.id },

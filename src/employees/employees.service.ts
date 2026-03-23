@@ -16,99 +16,99 @@ export class EmployeesService {
   }
 
   async createEmployee(dto: CreateEmployeeDto, addedByRole: string) {
+    const emailExists = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
 
-const emailExists = await this.prisma.user.findUnique({
-  where: { email: dto.email },
-});
+    if (emailExists) {
+      throw new BadRequestException('Email already exists');
+    }
 
-if (emailExists) {
-  throw new BadRequestException('Email already exists');
-}
+    const empExists = await this.prisma.employee.findUnique({
+      where: { empCode: dto.empCode },
+    });
 
-const empExists = await this.prisma.employee.findUnique({
-  where: { empCode: dto.empCode },
-});
+    if (empExists) {
+      throw new BadRequestException('Employee Code already exists');
+    }
 
-if (empExists) {
-  throw new BadRequestException('Employee Code already exists');
-}
+    const rawPassword = this.generatePassword();
+    const hashedPassword = await bcrypt.hash(rawPassword, 10);
 
-const rawPassword = this.generatePassword();
-const hashedPassword = await bcrypt.hash(rawPassword, 10);
+    const user = await this.prisma.user.create({
+      data: {
+        email: dto.email,
+        password: hashedPassword,
+        role: dto.role,
+      },
+    });
 
-const user = await this.prisma.user.create({
-  data: {
-    email: dto.email,
-    password: hashedPassword,
-    role: dto.role,
-  },
-});
+    // transform incoming DTO values to types Prisma expects
+    await this.prisma.employee.create({
+      data: {
+        userId: user.id,
+        empCode: dto.empCode,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        department: dto.department,
+        designation: dto.designation,
+        isExperienced: dto.isExperienced,
 
-// transform incoming DTO values to types Prisma expects
-await this.prisma.employee.create({
-  data: {
-    userId: user.id,
-    empCode: dto.empCode,
-    firstName: dto.firstName,
-    lastName: dto.lastName,
-    department: dto.department,
-    designation: dto.designation,
-    isExperienced: dto.isExperienced,
+        employmentType: dto.employmentType,
+        status: dto.status,
+        sourceOfHire: dto.sourceOfHire,
 
-    employmentType: dto.employmentType,
-    status: dto.status,
-    sourceOfHire: dto.sourceOfHire,
+        // ensure ISO datetime (Prisma requires full timestamp)
+        dateOfJoining: dto.dateOfJoining
+          ? new Date(dto.dateOfJoining)
+          : undefined,
 
-    // ensure ISO datetime (Prisma requires full timestamp)
-    dateOfJoining: dto.dateOfJoining ? new Date(dto.dateOfJoining) : undefined,
+        currentExperience:
+          dto.currentExperience != null
+            ? Number(dto.currentExperience)
+            : undefined,
+        reportingManager: dto.reportingManager,
 
-    currentExperience: dto.currentExperience != null ? Number(dto.currentExperience) : undefined,
-    reportingManager: dto.reportingManager,
+        dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
+        age: dto.age != null ? Number(dto.age) : undefined,
+        gender: dto.gender,
 
-    dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
-    age: dto.age != null ? Number(dto.age) : undefined,
-    gender: dto.gender,
+        currentAddress: dto.currentAddress,
+        permanentAddress: dto.permanentAddress,
+        pincode: dto.pincode,
+        city: dto.city,
 
-    currentAddress: dto.currentAddress,
-    permanentAddress: dto.permanentAddress,
-    pincode: dto.pincode,
-    city: dto.city,
+        maritalStatus: dto.maritalStatus,
 
-    maritalStatus: dto.maritalStatus,
+        phone: dto.phone,
+        personalMobile: dto.personalMobile,
 
-    phone: dto.phone,
-    personalMobile: dto.personalMobile,
+        dateOfExit: dto.dateOfExit ? new Date(dto.dateOfExit) : undefined,
 
-    dateOfExit: dto.dateOfExit ? new Date(dto.dateOfExit) : undefined,
+        panNumber: dto.panNumber,
+        aadharNumber: dto.aadharNumber,
+        pfNumber: dto.pfNumber,
+        uanNumber: dto.uanNumber,
 
-    panNumber: dto.panNumber,
-    aadharNumber: dto.aadharNumber,
-    pfNumber: dto.pfNumber,
-    uanNumber: dto.uanNumber,
+        bankAccountNumber: dto.bankAccountNumber,
+        bankName: dto.bankName,
+        ifscCode: dto.ifscCode,
 
-    bankAccountNumber: dto.bankAccountNumber,
-    bankName: dto.bankName,
-    ifscCode: dto.ifscCode,
+        addedBy: addedByRole,
+      },
+    });
 
-    addedBy: addedByRole,
-  },
-});
+    await this.mailService.sendEmployeeCredentials(dto.email, rawPassword);
 
-await this.mailService.sendEmployeeCredentials(
-  dto.email,
-  rawPassword,
-);
+    return {
+      message: 'Employee created successfully',
+      username: dto.email,
+      password: rawPassword,
+      role: dto.role,
+    };
+  }
 
-return {
-  message: 'Employee created successfully',
-  username: dto.email,
-  password: rawPassword,
-  role: dto.role,
-};
-
-}
-
-   // ✅ HR / ADMIN / MANAGER → Get all employees
+  // ✅ HR / ADMIN / MANAGER → Get all employees
   async getAllEmployees() {
     return this.prisma.employee.findMany({
       include: {
@@ -140,6 +140,8 @@ return {
         leaves: true,
         leaveBalances: true,
         wfhRequests: true,
+        salaries: true,
+        payrolls: true,
       },
     });
 
@@ -149,5 +151,178 @@ return {
 
     return employee;
   }
-}
 
+  async findByEmpCode(empCode: string) {
+    if (!empCode) {
+      throw new BadRequestException('Employee code is required');
+    }
+
+    const employee = await this.prisma.employee.findUnique({
+      where: { empCode },
+      include: { user: true },
+    });
+
+    if (!employee) {
+      throw new BadRequestException('Employee not found');
+    }
+
+    return employee;
+  }
+
+  async updateEmployee(employeeId: number, dto: Partial<CreateEmployeeDto>) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      include: { user: true },
+    });
+
+    if (!employee) {
+      throw new BadRequestException('Employee not found');
+    }
+
+    if (dto.empCode && dto.empCode !== employee.empCode) {
+      const existingByCode = await this.prisma.employee.findUnique({
+        where: { empCode: dto.empCode },
+      });
+      if (existingByCode) {
+        throw new BadRequestException('Employee code already exists');
+      }
+    }
+
+    if (dto.email && dto.email !== employee.user.email) {
+      const existingEmail = await this.prisma.user.findUnique({
+        where: { email: dto.email },
+      });
+      if (existingEmail && existingEmail.id !== employee.userId) {
+        throw new BadRequestException('Email already exists');
+      }
+    }
+
+    // update linked user record where applicable
+    const userUpdateData: any = {};
+    if (dto.email !== undefined) userUpdateData.email = dto.email;
+    if (dto.role !== undefined) userUpdateData.role = dto.role;
+
+    if (Object.keys(userUpdateData).length > 0) {
+      await this.prisma.user.update({
+        where: { id: employee.userId },
+        data: userUpdateData,
+      });
+    }
+
+    const employeeUpdateData: any = {};
+    const setIfDefined = (key: string, value: any) => {
+      if (value !== undefined) {
+        employeeUpdateData[key] = value;
+      }
+    };
+
+    setIfDefined('empCode', dto.empCode);
+    setIfDefined('firstName', dto.firstName);
+    setIfDefined('lastName', dto.lastName);
+    setIfDefined('department', dto.department);
+    setIfDefined('designation', dto.designation);
+    setIfDefined('isExperienced', dto.isExperienced);
+    setIfDefined('employmentType', dto.employmentType);
+    setIfDefined('status', dto.status);
+    setIfDefined('sourceOfHire', dto.sourceOfHire);
+    setIfDefined('reportingManager', dto.reportingManager);
+    setIfDefined(
+      'currentExperience',
+      dto.currentExperience != null ? Number(dto.currentExperience) : undefined,
+    );
+    setIfDefined('age', dto.age != null ? Number(dto.age) : undefined);
+    setIfDefined('gender', dto.gender);
+    setIfDefined('currentAddress', dto.currentAddress);
+    setIfDefined('permanentAddress', dto.permanentAddress);
+    setIfDefined('pincode', dto.pincode);
+    setIfDefined('city', dto.city);
+    setIfDefined('maritalStatus', dto.maritalStatus);
+    setIfDefined('phone', dto.phone);
+    setIfDefined('personalMobile', dto.personalMobile);
+    setIfDefined('panNumber', dto.panNumber);
+    setIfDefined('aadharNumber', dto.aadharNumber);
+    setIfDefined('pfNumber', dto.pfNumber);
+    setIfDefined('uanNumber', dto.uanNumber);
+    setIfDefined('bankAccountNumber', dto.bankAccountNumber);
+    setIfDefined('bankName', dto.bankName);
+    setIfDefined('ifscCode', dto.ifscCode);
+
+    if (dto.dateOfJoining !== undefined) {
+      setIfDefined(
+        'dateOfJoining',
+        dto.dateOfJoining ? new Date(dto.dateOfJoining) : null,
+      );
+    }
+    if (dto.dateOfBirth !== undefined) {
+      setIfDefined(
+        'dateOfBirth',
+        dto.dateOfBirth ? new Date(dto.dateOfBirth) : null,
+      );
+    }
+    if (dto.dateOfExit !== undefined) {
+      setIfDefined(
+        'dateOfExit',
+        dto.dateOfExit ? new Date(dto.dateOfExit) : null,
+      );
+    }
+
+    if (Object.keys(employeeUpdateData).length === 0) {
+      return {
+        message: 'No updates provided',
+      };
+    }
+
+    await this.prisma.employee.update({
+      where: { id: employeeId },
+      data: employeeUpdateData,
+    });
+
+    return {
+      message: 'Employee details updated successfully',
+    };
+  }
+
+  // ✅ HR / ADMIN / MANAGER → Get detailed employee info by ID
+  async getEmployeeDetailsById(employeeId: number) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            role: true,
+            isActive: true,
+          },
+        },
+        attendances: true,
+        leaves: true,
+        leaveBalances: true,
+        wfhRequests: true,
+        documents: true,
+        salaries: true,
+        payrolls: true,
+      },
+    });
+
+    if (!employee) {
+      throw new BadRequestException('Employee not found');
+    }
+
+    return employee;
+  }
+
+  // ✅ Get employee ID by user ID (for logged-in user)
+  async getEmployeeIdByUserId(userId: number) {
+    const employee = await this.prisma.employee.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+
+    if (!employee) {
+      throw new BadRequestException('Employee record not found for this user');
+    }
+
+    return { employeeId: employee.id };
+  }
+}

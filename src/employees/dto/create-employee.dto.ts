@@ -1,8 +1,20 @@
-import { IsString, IsEmail, IsOptional, IsEnum, IsDateString, IsNumber } from 'class-validator';
-import { Role, EmploymentType, EmployeeStatus, Gender, MaritalStatus } from '@prisma/client';
+import {
+  IsString,
+  IsEmail,
+  IsOptional,
+  IsEnum,
+  IsDateString,
+  IsNumber,
+} from 'class-validator';
+import {
+  Role,
+  EmploymentType,
+  EmployeeStatus,
+  Gender,
+  MaritalStatus,
+} from '@prisma/client';
 
 export class CreateEmployeeDto {
-
   @IsEmail()
   email: string;
 

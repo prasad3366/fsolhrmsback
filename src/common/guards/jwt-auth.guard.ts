@@ -1,4 +1,8 @@
-import { Injectable, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  ExecutionContext,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -41,7 +45,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       request.user = {
         id: user.id,
         role: user.role,
-        employeeId: user.employee?.id,
+        employeeId: user.employee?.id || null,
         email: user.email,
       };
 

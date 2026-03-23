@@ -10,7 +10,6 @@ import {
 import { Type } from 'class-transformer';
 
 export class CreateLeaveDto {
-
   @Type(() => Number)
   @IsInt()
   @Min(1)

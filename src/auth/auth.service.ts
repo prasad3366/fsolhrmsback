@@ -35,14 +35,20 @@ export class AuthService {
       role: user.role,
     };
 
-    const accessToken = this.jwt.sign(payload as any, {
-      expiresIn: process.env.JWT_ACCESS_EXPIRY as string,
-    } as any);
+    const accessToken = this.jwt.sign(
+      payload as any,
+      {
+        expiresIn: process.env.JWT_ACCESS_EXPIRY as string,
+      } as any,
+    );
 
-    const refreshToken = this.jwt.sign(payload as any, {
-      expiresIn: process.env.JWT_REFRESH_EXPIRY as string,
-      secret: process.env.JWT_REFRESH_SECRET,
-    } as any);
+    const refreshToken = this.jwt.sign(
+      payload as any,
+      {
+        expiresIn: process.env.JWT_REFRESH_EXPIRY as string,
+        secret: process.env.JWT_REFRESH_SECRET,
+      } as any,
+    );
 
     // store hashed refresh token
     const hashed = await bcrypt.hash(refreshToken, 10);
@@ -124,7 +130,9 @@ export class AuthService {
     // Step 1: Request OTP (no OTP or newPassword provided)
     if (!otp && !newPassword) {
       // Generate 6-digit OTP
-      const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const generatedOtp = Math.floor(
+        100000 + Math.random() * 900000,
+      ).toString();
       const expires = new Date(Date.now() + 5 * 60 * 1000); // 5 min expiry
       await this.prisma.user.update({
         where: { email },
@@ -139,8 +147,7 @@ export class AuthService {
     if (otp && newPassword) {
       if (!user.resetOtp || !user.resetOtpExpires)
         throw new BadRequestException('No OTP requested');
-      if (user.resetOtp !== otp)
-        throw new BadRequestException('Invalid OTP');
+      if (user.resetOtp !== otp) throw new BadRequestException('Invalid OTP');
       if (user.resetOtpExpires < new Date())
         throw new BadRequestException('OTP expired');
 

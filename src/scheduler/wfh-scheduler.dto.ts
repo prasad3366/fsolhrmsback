@@ -4,12 +4,10 @@ import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class WfhScheduler {
-
   constructor(private prisma: PrismaService) {}
 
   @Cron('0 0 * * *')
   async resetWFH() {
-
     const today = new Date();
 
     const expired = await this.prisma.wFHRequest.findMany({

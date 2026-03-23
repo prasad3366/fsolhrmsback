@@ -7,7 +7,6 @@ import { HolidaysModule } from '../holidays/holidays.module';
 @Module({
   controllers: [AttendanceController],
   providers: [AttendanceService, PrismaService],
-  imports: [HolidaysModule]
-
+  imports: [HolidaysModule],
 })
 export class AttendanceModule {}

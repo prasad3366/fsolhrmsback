@@ -40,10 +40,7 @@ export class DocumentsController {
       limits: { fileSize: 5 * 1024 * 1024 },
     }),
   )
-  uploadMultiple(
-    @UploadedFiles() files: Express.Multer.File[],
-    @Body() body,
-  ) {
+  uploadMultiple(@UploadedFiles() files: Express.Multer.File[], @Body() body) {
     return this.service.uploadMultiple(
       Number(body.employeeId),
       body.documentTypeIds,
@@ -67,11 +64,7 @@ export class DocumentsController {
     @Body('status') status: DocumentStatus,
     @Body('role') role: string,
   ) {
-    return this.service.updateDocumentStatus(
-      Number(id),
-      status,
-      role,
-    );
+    return this.service.updateDocumentStatus(Number(id), status, role);
   }
 
   // Approve All Documents
@@ -80,10 +73,7 @@ export class DocumentsController {
     @Param('employeeId') employeeId: string,
     @Body('role') role: string,
   ) {
-    return this.service.approveAllDocuments(
-      Number(employeeId),
-      role,
-    );
+    return this.service.approveAllDocuments(Number(employeeId), role);
   }
 
   // View File

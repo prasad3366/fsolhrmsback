@@ -3,7 +3,6 @@ import * as nodemailer from 'nodemailer';
 
 @Injectable()
 export class MailService {
-
   private transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 587,
@@ -14,10 +13,7 @@ export class MailService {
     },
   });
 
-  async sendEmployeeCredentials(
-    to: string,
-    password: string,
-  ) {
+  async sendEmployeeCredentials(to: string, password: string) {
     await this.transporter.sendMail({
       from: `"HR Portal" <${process.env.SMTP_EMAIL}>`,
       to,

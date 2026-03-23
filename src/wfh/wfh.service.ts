@@ -10,13 +10,10 @@ export class WfhService {
   // Employee → Request WFH
   // ==================================
   async request(employeeId: number, dto: RequestWfhDto) {
-
     const { startDate, endDate, reason } = dto;
 
     if (!startDate || !endDate) {
-      throw new BadRequestException(
-        'Start date and End date are required',
-      );
+      throw new BadRequestException('Start date and End date are required');
     }
 
     const start = new Date(startDate);
@@ -27,9 +24,7 @@ export class WfhService {
     }
 
     if (start > end) {
-      throw new BadRequestException(
-        'Start date cannot be after end date',
-      );
+      throw new BadRequestException('Start date cannot be after end date');
     }
 
     // ✅ Prevent overlapping WFH
@@ -43,9 +38,7 @@ export class WfhService {
     });
 
     if (overlap) {
-      throw new BadRequestException(
-        'WFH already requested for this period',
-      );
+      throw new BadRequestException('WFH already requested for this period');
     }
 
     return this.prisma.wFHRequest.create({

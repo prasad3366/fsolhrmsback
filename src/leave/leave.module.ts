@@ -26,4 +26,3 @@ import { HolidaysModule } from '../holidays/holidays.module'; // ⭐ REQUIRED
   exports: [LeaveService],
 })
 export class LeaveModule {}
-
