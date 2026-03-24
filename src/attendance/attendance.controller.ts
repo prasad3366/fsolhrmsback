@@ -92,4 +92,12 @@ export class AttendanceController {
   getMyAttendance(@Req() req) {
     return this.service.getMyAttendance(req.user.employeeId);
   }
+
+  // ============================
+  // EMPLOYEE TODAY STATUS (for punch buttons)
+  // ============================
+  @Get('today-status')
+  getTodayStatus(@Req() req) {
+    return this.service.getTodayAttendance(req.user.employeeId);
+  }
 }

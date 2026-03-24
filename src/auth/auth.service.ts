@@ -138,8 +138,15 @@ export class AuthService {
         where: { email },
         data: { resetOtp: generatedOtp, resetOtpExpires: expires },
       });
+      // Get employee's firstName
+      const employee = await this.prisma.employee.findUnique({
+        where: { userId: user.id },
+        select: { firstName: true },
+      });
+      const firstName = employee?.firstName || 'User';
+
       // Send OTP to email
-      await this.mailService.sendOtp(email, generatedOtp);
+      await this.mailService.sendOtp(email, generatedOtp, firstName);
       return { message: 'OTP sent to your email' };
     }
 
@@ -156,7 +163,7 @@ export class AuthService {
         where: { email },
         data: {
           password: hashed,
-          refreshToken: null, // invalidate sessions
+          refreshToken: null, 
           resetOtp: null,
           resetOtpExpires: null,
         },

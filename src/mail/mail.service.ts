@@ -17,7 +17,7 @@ export class MailService {
       },
     });
 
-    // 🔍 Verify connection at startup
+
     this.transporter.verify()
       .then(() => console.log('✅ SMTP Connected'))
       .catch((err) => console.error('❌ SMTP Connection Error:', err));
@@ -102,7 +102,7 @@ const info = await this.transporter.sendMail({
   }
 
   // ✅ Send OTP
-  async sendOtp(to: string, otp: string) {
+  async sendOtp(to: string, otp: string, firstName: string) {
     try {
       console.log('📧 Sending OTP to:', to);
 
@@ -124,18 +124,51 @@ const info = await this.transporter.sendMail({
           />
         </div>
 
-        <h3>Password Reset OTP</h3>
-        <p>Your OTP is: <strong>${otp}</strong></p>
-        <p>This OTP is valid for 5 minutes.</p>
-      `,
-      attachments: [
-        {
-          filename: 'foodeezlogo1.jpeg',
-          path: logoPath,
-          cid: logoCid,
-        },
-      ],
-      });
+        <p>Hello ${firstName},</p>
+
+        <p>Your OTP for password reset has been generated.</p>
+
+        <p><strong>OTP Details:</strong></p>
+        <p>
+          OTP: <strong>${otp}</strong><br/>
+          Valid for: 5 minutes
+        </p>
+
+        <p>You can reset your password using the link below:</p>
+
+        <p>
+          <a href="https://hrms.palatenetworks.in">
+            https://hrms.palatenetworks.in
+          </a>
+        </p>
+
+        <p>Please use the OTP to complete your password reset.</p>
+
+        <p>If you did not request this, please contact the HR team.</p>
+
+        <br/>
+
+        <p>
+          Regards,<br/>
+          HR Team<br/>
+          Foodeez<br/>
+          Palate Networks Private Limited
+        </p>
+
+        <p style="font-size: 10px; color: #000; margin-top: 20px;">
+          This message contains information that may be privileged or confidential and is the property of Palate Networks Private Limited. It is intended only for the person to whom it is addressed. If you are not the intended recipient, please notify the sender and delete this message.
+        </p>
+
+      </div>
+    `,
+    attachments: [
+      {
+        filename: 'foodeezlogo1.jpeg',
+        path: logoPath,
+        cid: logoCid,
+      },
+    ],
+  });
 
       console.log('✅ OTP Sent:', info.messageId);
       return info;

@@ -177,4 +177,20 @@ export class AttendanceService {
       orderBy: { date: 'desc' },
     });
   }
+
+  async getTodayAttendance(employeeId: number) {
+    const today = this.today();
+    const record = await this.prisma.attendance.findUnique({
+      where: { employeeId_date: { employeeId, date: today } },
+    });
+    return {
+      hasPunchedIn: !!record?.punchIn,
+      hasPunchedOut: !!record?.punchOut,
+      punchInTime: record?.punchIn || null,
+      punchOutTime: record?.punchOut || null,
+      locationStatus: record?.locationStatus || null,
+      totalHours: record?.totalHours || 0,
+      status: record?.status || null,
+    };
+  }
 }
