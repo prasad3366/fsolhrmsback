@@ -63,10 +63,18 @@ export class AuthService {
 
   // ---------- LOGIN ----------
   async login(email: string, password: string) {
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    const user = await this.prisma.user.findUnique({ 
+      where: { email },
+      include: { employee: true },
+    });
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // Check if employee status is INACTIVE
+    if (user.employee && user.employee.status === 'INACTIVE') {
+      throw new UnauthorizedException('Your account has been deactivated. Please contact HR.');
     }
 
     const match = await bcrypt.compare(password, user.password);
@@ -91,10 +99,16 @@ export class AuthService {
 
       const user = await this.prisma.user.findUnique({
         where: { id: payload.sub },
+        include: { employee: true },
       });
 
       if (!user || !user.refreshToken || !user.isActive) {
         throw new UnauthorizedException();
+      }
+
+      // Check if employee status is INACTIVE
+      if (user.employee && user.employee.status === 'INACTIVE') {
+        throw new UnauthorizedException('Your account has been deactivated.');
       }
 
       const valid = await bcrypt.compare(token, user.refreshToken);

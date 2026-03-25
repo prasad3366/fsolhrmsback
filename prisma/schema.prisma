@@ -60,6 +60,7 @@ model User {
 
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  assets        Asset[]
 }
 
 
@@ -469,4 +470,18 @@ model PayrollAdjustment {
   createdAt DateTime @default(now())
 
   payroll Payroll @relation(fields:[payrollId],references:[id])
+}
+
+
+model Asset {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  assignedTo  Int?
+  assignedAt  DateTime?
+  status      String   @default("ASSIGNED") // ASSIGNED, RETURNED
+  returnedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  user        User?    @relation(fields: [assignedTo], references: [id])
 }

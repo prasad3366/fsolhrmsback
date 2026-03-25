@@ -90,7 +90,7 @@ export class AttendanceController {
   // ============================
   @Get('my-history')
   getMyAttendance(@Req() req) {
-    return this.service.getMyAttendance(req.user.employeeId);
+    return this.service.getMyAttendance(req.user.id);
   }
 
   // ============================

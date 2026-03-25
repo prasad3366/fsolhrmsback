@@ -9,11 +9,13 @@ import { WfhModule } from './wfh/wfh.module';
 
 import { PrismaService } from './prisma/prisma.service';
 import { WfhScheduler } from './scheduler/wfh.scheduler';
+import { EmployeeExitScheduler } from './scheduler/employee-exit.scheduler';
 import { LeaveModule } from './leave/leave.module';
 import { HolidaysModule } from './holidays/holidays.module';
 import { DocumentsModule } from './documents/documents.module';
 import { PayrollModule } from './payroll/payroll.module';
 import { SalaryModule } from './salary/salary.module';
+import { AssetsModule } from './assets/assets.module';
 
 @Module({
   imports: [
@@ -31,7 +33,8 @@ import { SalaryModule } from './salary/salary.module';
     DocumentsModule,
     PayrollModule,
     SalaryModule,
+    AssetsModule,
   ],
-  providers: [PrismaService, WfhScheduler],
+  providers: [PrismaService, WfhScheduler, EmployeeExitScheduler],
 })
 export class AppModule {}

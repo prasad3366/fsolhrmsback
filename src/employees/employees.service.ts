@@ -197,11 +197,38 @@ export class EmployeesService {
       }
     }
 
+    // Check if employee is being set to INACTIVE or exit date is being set
+    let shouldDeactivateCredentials = false;
+
+    // If status is being changed to INACTIVE OR if already INACTIVE
+    const newStatus = dto.status || employee.status;
+    if (newStatus === 'INACTIVE') {
+      shouldDeactivateCredentials = true;
+    }
+
+    // If dateOfExit is being set to today or in the past
+    if (dto.dateOfExit) {
+      const exitDate = new Date(dto.dateOfExit);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      exitDate.setHours(0, 0, 0, 0);
+
+      if (exitDate <= today) {
+        shouldDeactivateCredentials = true;
+      }
+    }
+
     // update linked user record where applicable
     const userUpdateData: any = {};
     if (dto.email !== undefined) userUpdateData.email = dto.email;
     if (dto.role !== undefined) userUpdateData.role = dto.role;
 
+    // Deactivate credentials if needed
+    if (shouldDeactivateCredentials) {
+      userUpdateData.isActive = false;
+    }
+
+    // Update user if there are changes OR if credentials need to be deactivated
     if (Object.keys(userUpdateData).length > 0) {
       await this.prisma.user.update({
         where: { id: employee.userId },
@@ -272,13 +299,23 @@ export class EmployeesService {
       };
     }
 
-    await this.prisma.employee.update({
+    const updatedEmployee = await this.prisma.employee.update({
       where: { id: employeeId },
       data: employeeUpdateData,
     });
 
+    let message = 'Employee details updated successfully';
+    if (shouldDeactivateCredentials) {
+      message += ' | Employee credentials have been deactivated (isActive: false).';
+    }
+
     return {
-      message: 'Employee details updated successfully',
+      message,
+      employee: {
+        id: updatedEmployee.id,
+        status: updatedEmployee.status,
+      },
+      credentialsDeactivated: shouldDeactivateCredentials,
     };
   }
 
