@@ -22,10 +22,63 @@ export class DocumentsService {
 
     if (!employee) throw new NotFoundException('Employee not found');
 
+    const mandatoryCommonDocs = [];
+    const mandatoryExperiencedDocs = ['Payslip', 'Experience Letter', 'Relieving Letter'];
+
+    // ensure common doc type exists for all employees
+    await Promise.all(
+      mandatoryCommonDocs.map((name) =>
+        this.prisma.documentType.upsert({
+          where: { name },
+          update: {
+            isMandatory: true,
+            forExperienced: true,
+            forFresher: true,
+          },
+          create: {
+            name,
+            isMandatory: true,
+            forExperienced: true,
+            forFresher: true,
+          },
+        }),
+      ),
+    );
+
+    if (employee.isExperienced) {
+      // Ensure experienced-only doc types exist, and include them in required docs
+      await Promise.all(
+        mandatoryExperiencedDocs.map((name) =>
+          this.prisma.documentType.upsert({
+            where: { name },
+            update: { forExperienced: true },
+            create: {
+              name,
+              isMandatory: true,
+              forExperienced: true,
+              forFresher: false,
+            },
+          }),
+        ),
+      );
+
+      return this.prisma.documentType.findMany({
+        where: {
+          OR: [
+            { forExperienced: true },
+            { name: { in: [...mandatoryCommonDocs, ...mandatoryExperiencedDocs] } },
+          ],
+        },
+      });
+    }
+
     return this.prisma.documentType.findMany({
-      where: employee.isExperienced
-        ? { forExperienced: true }
-        : { forFresher: true },
+      where: {
+        OR: [
+          { forFresher: true },
+          { name: { in: mandatoryCommonDocs } },
+        ],
+      },
     });
   }
 

@@ -304,6 +304,26 @@ export class EmployeesService {
       data: employeeUpdateData,
     });
 
+    // if employee is set as experienced, ensure related document types are available
+    if (dto.isExperienced === true) {
+      const mandatoryExperiencedDocs = ['Payslip', 'Experience Letter', 'Relieving Letter'];
+
+      await Promise.all(
+        mandatoryExperiencedDocs.map((name) =>
+          this.prisma.documentType.upsert({
+            where: { name },
+            update: { forExperienced: true },
+            create: {
+              name,
+              isMandatory: true,
+              forExperienced: true,
+              forFresher: false,
+            },
+          }),
+        ),
+      );
+    }
+
     let message = 'Employee details updated successfully';
     if (shouldDeactivateCredentials) {
       message += ' | Employee credentials have been deactivated (isActive: false).';
