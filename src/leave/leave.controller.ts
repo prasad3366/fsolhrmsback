@@ -47,6 +47,11 @@ export class LeaveController {
     return this.service.pendingRequests(req.user.role);
   }
 
+  @Get('all')
+  all(@Req() req) {
+    return this.service.allLeaveRequests(req.user.role);
+  }
+
   @Get('balance')
   balance(@Req() req, @Query('yearStart') yearStart: string) {
     return this.service.getBalance(

@@ -108,7 +108,7 @@ export class LeaveService {
       throw new BadRequestException('Employee cannot approve leave');
     }
 
-    return this.prisma.$transaction([
+    await this.prisma.$transaction([
       this.prisma.leave.update({
         where: { id: leaveId },
         data: { status: 'APPROVED' },
@@ -125,6 +125,11 @@ export class LeaveService {
         data: { used: { increment: leave.totalDays } },
       }),
     ]);
+
+    return this.prisma.leave.findUnique({
+      where: { id: leaveId },
+      include: { employee: true, leaveType: true },
+    });
   }
 
   // ================= REJECT LEAVE =================
@@ -145,9 +150,14 @@ export class LeaveService {
       throw new BadRequestException('Only Admin can reject this leave');
     }
 
-    return this.prisma.leave.update({
+    await this.prisma.leave.update({
       where: { id },
       data: { status: 'REJECTED', remarks },
+    });
+
+    return this.prisma.leave.findUnique({
+      where: { id },
+      include: { employee: true, leaveType: true },
     });
   }
 
@@ -182,17 +192,19 @@ export class LeaveService {
       where: {
         ...(role === 'EMPLOYEE' && { employeeId }),
       },
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        startDate: true,
-        endDate: true,
-        totalDays: true,
-        status: true,
-        remarks: true,
-        leaveType: { select: { name: true } },
-        createdAt: true,
+      include: {
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            empCode: true,
+            user: { select: { email: true } },
+          },
+        },
+        leaveType: true,
       },
+      orderBy: { createdAt: 'desc' },
     });
   }
 
@@ -207,10 +219,29 @@ export class LeaveService {
     });
   }
 
+  // ================= ALL LEAVE REQUESTS =================
+  async allLeaveRequests(role: string) {
+    if (role === 'EMPLOYEE') throw new BadRequestException('Access denied');
+
+    return this.prisma.leave.findMany({
+      include: { employee: true, leaveType: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   async selfLeaveHistory(employeeId: number) {
     return this.prisma.leave.findMany({
       where: { employeeId },
       include: {
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            empCode: true,
+            user: { select: { email: true } },
+          },
+        },
         leaveType: true,
       },
       orderBy: { createdAt: 'desc' },
