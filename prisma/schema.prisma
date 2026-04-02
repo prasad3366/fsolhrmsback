@@ -369,26 +369,23 @@ enum AdjustmentType {
 }
 
 model SalaryStructure {
-
   id Int @id @default(autoincrement())
 
   name String
 
-  basicPercent Float @default(40)
-
-  hraPercent Float @default(20)
+  basicPercent Float @default(35)
+  hraPercent Float @default(50)
+  conveyancePercent Float @default(15)
 
   pfPercent Float @default(12)
 
   ptAmount Float @default(200)
-
   healthInsurance Float @default(0)
 
   createdAt DateTime @default(now())
 
   salaries EmployeeSalary[]
 }
-
 model EmployeeSalary {
 
   id Int @id @default(autoincrement())

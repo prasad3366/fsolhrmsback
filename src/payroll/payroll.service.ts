@@ -133,6 +133,9 @@ export class PayrollService {
 
     /* 🔥 Calculation */
 
+    console.log('DEBUG: salary.monthlyCTC =', salary.monthlyCTC);
+    console.log('DEBUG: salary.structure =', salary.structure);
+
     const calc = PayrollCalculator.calculate(
       salary.monthlyCTC,
       salary.structure,
@@ -154,14 +157,11 @@ export class PayrollService {
         presentDays,
         lopDays,
 
-        basic: calc.basic,
-        hra: calc.hra,
-        specialAllowance: calc.specialAllowance,
-        otherAllowance: calc.otherAllowance,
-
+	    basic: calc.basic,
+	    hra: calc.hra,
+	specialAllowance: calc.specialAllowance,
         pf: calc.pf,
-        pt: calc.pt,
-        leaveDeduction: calc.leaveDeduction,
+        pt: calc.pt,        leaveDeduction: calc.leaveDeduction,
 
         grossSalary: calc.gross,
         deductions: calc.deductions,

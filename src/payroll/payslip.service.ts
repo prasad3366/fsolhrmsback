@@ -158,13 +158,7 @@ Salary Slip
 <td>${payroll.leaveDeduction || 0}</td>
 </tr>
 
-<tr>
-<td>Other Allowance</td>
-<td>${payroll.otherAllowance || 0}</td>
 
-<td></td>
-<td></td>
-</tr>
 
 <tr>
 <td><b>Total Earnings</b></td>

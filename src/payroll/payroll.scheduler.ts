@@ -122,7 +122,6 @@ export class PayrollScheduler {
           basic: calc.basic,
           hra: calc?.hra || 0,
           specialAllowance: calc?.specialAllowance || 0,
-          otherAllowance: calc?.otherAllowance || 0,
 
           pf: calc?.pf || 0,
           pt: calc?.pt || 0,
