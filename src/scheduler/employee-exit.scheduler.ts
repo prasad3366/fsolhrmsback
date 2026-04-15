@@ -56,9 +56,10 @@ export class EmployeeExitScheduler {
         `Employee exit date check completed. Deactivated ${employeesToDeactivate.length} employee(s).`,
       );
     } catch (error) {
+      const err = error as Error;
       this.logger.error(
-        `Error during employee exit date check: ${error.message}`,
-        error.stack,
+        `Error during employee exit date check: ${err.message}`,
+        err.stack,
       );
     }
   }

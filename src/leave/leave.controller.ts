@@ -25,7 +25,7 @@ export class LeaveController {
 
   @Patch('approve/:id')
   approve(@Req() req, @Param('id') id: string) {
-    return this.service.approveLeave(+id, req.user.role);
+    return this.service.approveLeave(+id, req.user.employeeId, req.user.role);
   }
 
   @Patch('reject/:id')
@@ -34,7 +34,7 @@ export class LeaveController {
     @Param('id') id: string,
     @Body('remarks') remarks: string,
   ) {
-    return this.service.rejectLeave(+id, remarks, req.user.role);
+    return this.service.rejectLeave(+id, remarks, req.user.employeeId, req.user.role);
   }
 
   @Get('history')
@@ -71,12 +71,8 @@ export class LeaveController {
     return this.service.selfBalance(req.user.employeeId, +yearStart);
   }
 
-  @Get('self/monthly')
-  monthly(
-    @Req() req,
-    @Query('month') month: string,
-    @Query('year') year: string,
-  ) {
-    return this.service.monthlyLeaves(req.user.employeeId, +month, +year);
+  @Post('carry-forward')
+  carryForward(@Req() req, @Body() dto: { leaveTypeId: number; yearStart: number }) {
+    return this.service.requestCarryForward(req.user.employeeId, dto.leaveTypeId, dto.yearStart);
   }
 }

@@ -6,6 +6,7 @@ import {
   IsString,
   IsEnum,
   Min,
+  IsBoolean,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -13,18 +14,26 @@ export class CreateLeaveDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  leaveTypeId: number;
+  leaveTypeId!: number;
 
   @IsDateString()
-  startDate: string;
+  startDate!: string;
 
   @IsDateString()
-  endDate: string;
+  endDate!: string;
 
   @IsOptional()
   @IsEnum(LeaveDurationType)
   durationType?: LeaveDurationType;
 
   @IsString()
-  reason: string;
+  reason!: string;
+
+  @IsOptional()
+  @IsString()
+  medicalCertificate?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isEmergency?: boolean;
 }

@@ -32,35 +32,35 @@ export class LeaveScheduler {
     }
   }
 
-  // ⭐ MARCH 31 → CARRY FORWARD
-  @Cron('0 0 31 3 *')
-  async carryForward() {
-    const balances = await this.prisma.leaveBalance.findMany({
-      include: { leaveType: true },
-    });
+// ⭐ MARCH 31 → CARRY FORWARD (Commented out as it's now upon request)
+  // @Cron('0 0 31 3 *')
+  // async carryForward() {
+  //   const balances = await this.prisma.leaveBalance.findMany({
+  //     include: { leaveType: true },
+  //   });
 
-    for (const b of balances) {
-      if (!b.leaveType.carryForward) continue;
+  //   for (const b of balances) {
+  //     if (!b.leaveType.carryForward) continue;
 
-      const remaining = b.allocated + b.carryForward - b.used;
+  //     const remaining = b.allocated + b.carryForward - b.used;
 
-      await this.prisma.leaveBalance.update({
-        where: {
-          employeeId_leaveTypeId_yearStart: {
-            employeeId: b.employeeId,
-            leaveTypeId: b.leaveTypeId,
-            yearStart: b.yearStart,
-          },
-        },
-        data: {
-          carryForward: Math.min(
-            remaining,
-            b.leaveType.maxCarryLimit ?? remaining,
-          ),
-        },
-      });
-    }
-  }
+  //     await this.prisma.leaveBalance.update({
+  //       where: {
+  //         employeeId_leaveTypeId_yearStart: {
+  //           employeeId: b.employeeId,
+  //           leaveTypeId: b.leaveTypeId,
+  //           yearStart: b.yearStart,
+  //         },
+  //       },
+  //       data: {
+  //         carryForward: Math.min(
+  //           remaining,
+  //           b.leaveType.maxCarryLimit ?? remaining,
+  //         ),
+  //       },
+  //     });
+  //   }
+  // }
 
   // ⭐ APRIL 1 → NEW YEAR
   @Cron('0 0 1 4 *')

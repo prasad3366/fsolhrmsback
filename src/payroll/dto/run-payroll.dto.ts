@@ -12,8 +12,8 @@ export class RunPayrollDto {
 
   @IsInt()
   @Min(1)
-  month: number;
+  month!: number;
 
   @IsInt()
-  year: number;
+  year!: number;
 }

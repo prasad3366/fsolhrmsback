@@ -34,6 +34,23 @@ async function main() {
   console.log('Email:', adminUser.email);
   console.log('Role:', adminUser.role);
   console.log('Password:', password); // Only shown during seed
+
+  // Create leave types
+  const leaveTypes = [
+    { name: 'Casual Leave', yearlyQuota: 10, carryForward: true, maxCarryLimit: 2 },
+    { name: 'Sick Leave', yearlyQuota: 8, carryForward: true, maxCarryLimit: 1 },
+    { name: 'Maternity Leave', yearlyQuota: 182, carryForward: false, maxCarryLimit: null },
+  ];
+
+  for (const type of leaveTypes) {
+    await prisma.leaveType.upsert({
+      where: { name: type.name },
+      update: {},
+      create: type,
+    });
+  }
+
+  console.log('✅ Leave types created successfully!');
 }
 
 main()

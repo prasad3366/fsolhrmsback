@@ -287,6 +287,9 @@ model Leave {
   status          LeaveStatus @default(PENDING)
   remarks         String?
 
+  medicalCertificate String? // Required for Sick Leave > 2 days
+  isEmergency       Boolean @default(false) // Emergency leave notified within 24 hours
+
   employee        Employee @relation(fields: [employeeId], references: [id])
   leaveType       LeaveType @relation(fields: [leaveTypeId], references: [id])
 

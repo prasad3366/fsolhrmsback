@@ -2,14 +2,14 @@ import { IsNumber, IsString } from 'class-validator';
 
 export class OfficeLocationDto {
   @IsString()
-  name: string;
+  name!: string;
 
   @IsNumber()
-  latitude: number;
+  latitude!: number;
 
   @IsNumber()
-  longitude: number;
+  longitude!: number;
 
   @IsNumber()
-  radius: number;
+  radius!: number;
 }

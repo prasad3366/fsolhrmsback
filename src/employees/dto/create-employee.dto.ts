@@ -16,25 +16,25 @@ import {
 
 export class CreateEmployeeDto {
   @IsEmail()
-  email: string;
+  email!: string;
 
   @IsEnum(Role)
-  role: Role;
+  role!: Role;
 
   @IsString()
-  empCode: string;
+  empCode!: string;
 
   @IsString()
-  firstName: string;
+  firstName!: string;
 
   @IsString()
-  lastName: string;
+  lastName!: string;
 
   @IsString()
-  department: string;
+  department!: string;
 
   @IsString()
-  designation: string;
+  designation!: string;
 
   @IsOptional()
   @IsEnum(EmploymentType)
@@ -65,54 +65,54 @@ export class CreateEmployeeDto {
 
   @IsOptional()
   @IsEnum(Gender)
-  gender: Gender;
+  gender?: Gender;
 
   @IsOptional()
-  currentAddress: string;
+  currentAddress?: string;
 
   @IsOptional()
-  permanentAddress: string;
+  permanentAddress?: string;
 
   @IsOptional()
-  pincode: string;
+  pincode?: string;
 
   @IsOptional()
-  city: string;
+  city?: string;
 
   @IsOptional()
   @IsEnum(MaritalStatus)
-  maritalStatus: MaritalStatus;
+  maritalStatus?: MaritalStatus;
 
   @IsOptional()
-  phone: string;
+  phone?: string;
 
   @IsOptional()
-  personalMobile: string;
+  personalMobile?: string;
 
   @IsOptional()
-  panNumber: string;
+  panNumber?: string;
 
   @IsOptional()
-  aadharNumber: string;
+  aadharNumber?: string;
 
   @IsOptional()
-  pfNumber: string;
+  pfNumber?: string;
 
   @IsOptional()
-  uanNumber: string;
+  uanNumber?: string;
 
   @IsOptional()
-  bankAccountNumber: string;
+  bankAccountNumber?: string;
 
   @IsOptional()
-  bankName: string;
+  bankName?: string;
 
   @IsOptional()
-  ifscCode: string;
+  ifscCode?: string;
 
   @IsOptional()
-  dateOfExit: Date;
+  dateOfExit?: Date;
 
   @IsOptional()
-  isExperienced: boolean;
+  isExperienced?: boolean;
 }

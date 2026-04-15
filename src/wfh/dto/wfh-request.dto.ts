@@ -2,10 +2,10 @@ import { IsDateString, IsOptional, IsString } from 'class-validator';
 
 export class RequestWfhDto {
   @IsDateString()
-  startDate: string;
+  startDate!: string;
 
   @IsDateString()
-  endDate: string;
+  endDate!: string;
 
   @IsOptional()
   @IsString()

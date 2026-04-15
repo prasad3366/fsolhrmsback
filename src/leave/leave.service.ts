@@ -68,6 +68,11 @@ export class LeaveService {
     if (available < totalDays)
       throw new BadRequestException('Insufficient balance');
 
+    // Validation for Sick Leave
+    if (leaveType.name === 'Sick Leave' && totalDays > 2 && !dto.medicalCertificate) {
+      throw new BadRequestException('Medical certificate required for Sick Leave > 2 days');
+    }
+
     return this.prisma.leave.create({
       data: {
         employeeId,
@@ -78,12 +83,14 @@ export class LeaveService {
         totalDays,
         reason: dto.reason,
         yearStart,
+        medicalCertificate: dto.medicalCertificate,
+        isEmergency: dto.isEmergency ?? false,
       },
     });
   }
 
   // ================= APPROVE LEAVE =================
-  async approveLeave(leaveId: number, approverRole: string) {
+  async approveLeave(leaveId: number, approverEmployeeId: number, approverRole: string) {
     const leave = await this.prisma.leave.findUnique({
       where: { id: leaveId },
       include: { employee: { include: { user: true } } },
@@ -94,18 +101,19 @@ export class LeaveService {
     if (leave.status !== 'PENDING')
       throw new BadRequestException('Already processed');
 
-    const applicantRole = leave.employee.user.role;
+    const approver = await this.prisma.employee.findUnique({
+      where: { id: approverEmployeeId },
+      include: { user: true },
+    });
 
-    // ⭐ Approval Hierarchy
-    if (
-      (applicantRole === 'HR' || applicantRole === 'MANAGER') &&
-      approverRole !== 'ADMIN'
-    ) {
-      throw new BadRequestException('Only Admin can approve this leave');
-    }
+    if (!approver) throw new BadRequestException('Approver not found');
 
-    if (applicantRole === 'EMPLOYEE' && approverRole === 'EMPLOYEE') {
-      throw new BadRequestException('Employee cannot approve leave');
+    // Check if approver is the reporting manager or has appropriate role
+    const isReportingManager = leave.employee.reportingManager === approver.user.email;
+    const canApprove = isReportingManager || approverRole === 'HR' || approverRole === 'ADMIN';
+
+    if (!canApprove) {
+      throw new BadRequestException('Unauthorized to approve this leave');
     }
 
     await this.prisma.$transaction([
@@ -133,7 +141,7 @@ export class LeaveService {
   }
 
   // ================= REJECT LEAVE =================
-  async rejectLeave(id: number, remarks: string, approverRole: string) {
+  async rejectLeave(id: number, remarks: string, approverEmployeeId: number, approverRole: string) {
     const leave = await this.prisma.leave.findUnique({
       where: { id },
       include: { employee: { include: { user: true } } },
@@ -141,13 +149,19 @@ export class LeaveService {
 
     if (!leave) throw new NotFoundException('Leave not found');
 
-    const applicantRole = leave.employee.user.role;
+    const approver = await this.prisma.employee.findUnique({
+      where: { id: approverEmployeeId },
+      include: { user: true },
+    });
 
-    if (
-      (applicantRole === 'HR' || applicantRole === 'MANAGER') &&
-      approverRole !== 'ADMIN'
-    ) {
-      throw new BadRequestException('Only Admin can reject this leave');
+    if (!approver) throw new BadRequestException('Approver not found');
+
+    // Check if approver is the reporting manager or has appropriate role
+    const isReportingManager = leave.employee.reportingManager === approver.user.email;
+    const canApprove = isReportingManager || approverRole === 'HR' || approverRole === 'ADMIN';
+
+    if (!canApprove) {
+      throw new BadRequestException('Unauthorized to reject this leave');
     }
 
     await this.prisma.leave.update({
@@ -302,23 +316,38 @@ export class LeaveService {
     });
   }
 
-  private async countWorkingDays(start: Date, end: Date) {
-    let total = 0;
-    const current = new Date(start);
+  async requestCarryForward(employeeId: number, leaveTypeId: number, yearStart: number) {
+    const balance = await this.prisma.leaveBalance.findUnique({
+      where: {
+        employeeId_leaveTypeId_yearStart: {
+          employeeId,
+          leaveTypeId,
+          yearStart,
+        },
+      },
+      include: { leaveType: true },
+    });
 
-    while (current <= end) {
-      const isHoliday = await this.holidayService.isHoliday(current);
-
-      const day = current.getDay();
-      const isWeekend = day === 0 || day === 6;
-
-      if (!isHoliday && !isWeekend) {
-        total++;
-      }
-
-      current.setDate(current.getDate() + 1);
+    if (!balance || !balance.leaveType.carryForward) {
+      throw new BadRequestException('Carry forward not allowed for this leave type');
     }
 
-    return total;
+    const remaining = balance.allocated + balance.carryForward - balance.used;
+    const maxCarry = balance.leaveType.maxCarryLimit ?? remaining;
+
+    await this.prisma.leaveBalance.update({
+      where: {
+        employeeId_leaveTypeId_yearStart: {
+          employeeId,
+          leaveTypeId,
+          yearStart,
+        },
+      },
+      data: {
+        carryForward: Math.min(remaining, maxCarry),
+      },
+    });
+
+    return { message: 'Carry forward requested successfully' };
   }
 }
