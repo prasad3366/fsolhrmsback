@@ -37,7 +37,7 @@ async function main() {
 
   // Create leave types
   const leaveTypes = [
-    { name: 'Casual Leave', yearlyQuota: 10, carryForward: true, maxCarryLimit: 2 },
+    { name: 'Casual Leave', yearlyQuota: 12, carryForward: true, maxCarryLimit: 2 },
     { name: 'Sick Leave', yearlyQuota: 8, carryForward: true, maxCarryLimit: 1 },
     { name: 'Maternity Leave', yearlyQuota: 182, carryForward: false, maxCarryLimit: null },
   ];
@@ -45,7 +45,11 @@ async function main() {
   for (const type of leaveTypes) {
     await prisma.leaveType.upsert({
       where: { name: type.name },
-      update: {},
+      update: {
+        yearlyQuota: type.yearlyQuota,
+        carryForward: type.carryForward,
+        maxCarryLimit: type.maxCarryLimit,
+      },
       create: type,
     });
   }
