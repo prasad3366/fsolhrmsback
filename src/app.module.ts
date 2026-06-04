@@ -16,6 +16,7 @@ import { DocumentsModule } from './documents/documents.module';
 import { PayrollModule } from './payroll/payroll.module';
 import { SalaryModule } from './salary/salary.module';
 import { AssetsModule } from './assets/assets.module';
+import { HelpdeskModule } from './helpdesk/helpdesk.module';
 import { TeamModule } from './teams/team.module';
 
 @Module({
@@ -35,6 +36,7 @@ import { TeamModule } from './teams/team.module';
     PayrollModule,
     SalaryModule,
     AssetsModule,
+    HelpdeskModule,
     TeamModule,
   ],
   providers: [PrismaService, WfhScheduler, EmployeeExitScheduler],

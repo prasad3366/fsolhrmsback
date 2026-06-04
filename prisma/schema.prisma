@@ -19,6 +19,7 @@ model User {
   resetOtp        String?
   resetOtpExpires DateTime?
   assets          Asset[]
+  helpdeskTickets HelpdeskTicket[]
   employee        Employee?
 }
 
@@ -67,6 +68,7 @@ model Employee {
   leaveBalances     LeaveBalance[]
   payrolls          Payroll[]
   wfhRequests       WFHRequest[]
+  helpdeskTickets   HelpdeskTicket[]
   teamId Int?
   team   Team? @relation("TeamMembers", fields: [teamId], references: [id])
   managedTeam Team[] @relation("TeamManager")
@@ -81,7 +83,7 @@ model OfficeLocation {
   radius    Float
   createdAt DateTime @default(now())
 }
-
+   
 model Attendance {
   id             Int              @id @default(autoincrement())
   employeeId     Int
@@ -121,6 +123,20 @@ model WFHRequest {
   createdAt  DateTime  @default(now())
   reason     String?
   employee   Employee  @relation(fields: [employeeId], references: [id])
+}
+
+model HelpdeskTicket {
+  id         Int              @id @default(autoincrement())
+  userId     Int?
+  employeeId Int
+  issue      String
+  reason     String
+  status     HelpdeskStatus   @default(PENDING)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  resolvedAt DateTime?
+  user       User?            @relation(fields: [userId], references: [id])
+  employee   Employee         @relation(fields: [employeeId], references: [id])
 }
 
 model LeaveType {
@@ -364,6 +380,12 @@ enum WFHStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+enum HelpdeskStatus {
+  PENDING
+  APPROVED
+  RESOLVED
 }
 
 enum LeaveStatus {

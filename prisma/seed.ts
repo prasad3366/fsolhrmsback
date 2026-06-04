@@ -13,33 +13,47 @@ async function main() {
 
   if (existingAdmin) {
     console.log('Admin user already exists. Skipping creation.');
-    return;
+  } else {
+    const password = 'admin123';
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const adminUser = await prisma.user.create({
+      data: {
+        email: 'admin@example.com',
+        password: hashedPassword,
+        role: 'ADMIN',
+        isActive: true,
+      },
+    });
+
+    console.log('✅ Admin user created successfully!');
+    console.log('Email:', adminUser.email);
+    console.log('Password:', password);
   }
 
-  // Hash the password
-  const password = 'admin123'; // Change this to your desired password
-  const hashedPassword = await bcrypt.hash(password, 10);
-
-  // Create admin user
-  const adminUser = await prisma.user.create({
-    data: {
-      email: 'admin@example.com',
-      password: hashedPassword,
-      role: 'ADMIN',
-      isActive: true,
-    },
-  });
-
-  console.log('✅ Admin user created successfully!');
-  console.log('Email:', adminUser.email);
-  console.log('Role:', adminUser.role);
-  console.log('Password:', password); // Only shown during seed
-
-  // Create leave types
+  // Leave policy according to company rules
   const leaveTypes = [
-    { name: 'Casual Leave', yearlyQuota: 12, carryForward: true, maxCarryLimit: 2 },
-    { name: 'Sick Leave', yearlyQuota: 8, carryForward: true, maxCarryLimit: 1 },
-    { name: 'Maternity Leave', yearlyQuota: 182, carryForward: false, maxCarryLimit: null },
+    {
+      name: 'Casual Leave',
+      yearlyQuota: 10,   // ✅ Correct according to policy
+      carryForward: true,
+      maxCarryLimit: 2,
+      requiresMedical: false,
+    },
+    {
+      name: 'Sick Leave',
+      yearlyQuota: 8,
+      carryForward: true,
+      maxCarryLimit: 1,
+      requiresMedical: true, // ✅ Medical certificate required
+    },
+    {
+      name: 'Maternity Leave',
+      yearlyQuota: 182,
+      carryForward: false,
+      maxCarryLimit: 0,
+      requiresMedical: false,
+    },
   ];
 
   for (const type of leaveTypes) {
@@ -49,12 +63,13 @@ async function main() {
         yearlyQuota: type.yearlyQuota,
         carryForward: type.carryForward,
         maxCarryLimit: type.maxCarryLimit,
+        requiresMedical: type.requiresMedical,
       },
       create: type,
     });
   }
 
-  console.log('✅ Leave types created successfully!');
+  console.log('✅ Leave types created/updated successfully!');
 }
 
 main()
