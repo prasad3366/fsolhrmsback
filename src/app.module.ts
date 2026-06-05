@@ -38,6 +38,7 @@ import { TeamModule } from './teams/team.module';
     AssetsModule,
     HelpdeskModule,
     TeamModule,
+    
   ],
   providers: [PrismaService, WfhScheduler, EmployeeExitScheduler],
 })

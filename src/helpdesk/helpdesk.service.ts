@@ -31,6 +31,23 @@ export class HelpdeskService {
         reason,
         status: 'PENDING',
       },
+      include: {
+        employee: {
+          select: {
+            id: true,
+            empCode: true,
+            firstName: true,
+            lastName: true,
+            department: true,
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            email: true,
+          },
+        },
+      },
     });
   }
 
@@ -88,6 +105,12 @@ export class HelpdeskService {
             department: true,
           },
         },
+        user: {
+          select: {
+            id: true,
+            email: true,
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -114,6 +137,12 @@ export class HelpdeskService {
             firstName: true,
             lastName: true,
             department: true,
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            email: true,
           },
         },
       },
