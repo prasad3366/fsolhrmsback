@@ -120,6 +120,8 @@ export class EmployeesService {
             isActive: true,
           },
         },
+        payrolls: { select: { id: true }, take: 1 },
+        salaries: { select: { id: true }, take: 1 },
       },
     });
   }

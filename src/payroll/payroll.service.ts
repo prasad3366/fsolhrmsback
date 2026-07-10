@@ -36,9 +36,9 @@ export class PayrollService {
     return workingDays;
   }
 
-  /* 🔥 MAIN PAYROLL */
+  /* Resolve employeeId/empCode + month/year from the request */
 
-  async runPayroll(data: RunPayrollDto) {
+  private async resolveEmployeeAndPeriod(data: RunPayrollDto) {
     let employeeId = data.employeeId ? Number(data.employeeId) : undefined;
     const month = Number(data.month);
     const year = Number(data.year);
@@ -52,23 +52,13 @@ export class PayrollService {
       throw new BadRequestException('Invalid payroll request');
     }
 
-    /* Salary */
+    return { employeeId, month, year };
+  }
 
-    const salary = await this.prisma.employeeSalary.findFirst({
-      where: { employeeId },
-      include: { structure: true },
-    });
+  /* 🔥 MAIN PAYROLL */
 
-    if (!salary) {
-      throw new BadRequestException('Salary not configured');
-    }
-
-    /* Date Range */
-
-    const startDate = new Date(year, month - 1, 1);
-    const endDate = new Date(year, month, 0);
-
-    /* Prevent duplicate */
+  async runPayroll(data: RunPayrollDto) {
+    const { employeeId, month, year } = await this.resolveEmployeeAndPeriod(data);
 
     const existing = await this.prisma.payroll.findFirst({
       where: { employeeId, month, year },
@@ -76,6 +66,44 @@ export class PayrollService {
 
     if (existing) {
       throw new BadRequestException('Payroll already exists');
+    }
+
+    return this.computePayroll(employeeId, month, year);
+  }
+
+  /* Manual "Generate Payslip" action - reuses the payroll for the period
+     if it was already run, otherwise computes it on the fly. */
+
+  async generateOrGetPayroll(data: RunPayrollDto) {
+    const { employeeId, month, year } = await this.resolveEmployeeAndPeriod(data);
+
+    const existing = await this.prisma.payroll.findFirst({
+      where: { employeeId, month, year },
+    });
+
+    if (existing) {
+      return existing;
+    }
+
+    return this.computePayroll(employeeId, month, year);
+  }
+
+  private async computePayroll(employeeId: number, month: number, year: number) {
+    /* Date Range */
+
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0);
+
+    /* Salary - use whichever salary was effective as of this payroll month */
+
+    const salary = await this.prisma.employeeSalary.findFirst({
+      where: { employeeId, effectiveFrom: { lte: endDate } },
+      orderBy: { effectiveFrom: 'desc' },
+      include: { structure: true },
+    });
+
+    if (!salary) {
+      throw new BadRequestException('Salary not configured');
     }
 
     /* 🔥 Holidays */
@@ -122,7 +150,16 @@ export class PayrollService {
     let approvedLeaveDays = 0;
 
     for (const leave of leaves) {
-      approvedLeaveDays += leave.totalDays;
+      // Prorate leaves spanning a month boundary so only the days
+      // that fall inside this payroll month are credited.
+      const overlapStart = leave.startDate < startDate ? startDate : leave.startDate;
+      const overlapEnd = leave.endDate > endDate ? endDate : leave.endDate;
+      const overlapDays =
+        Math.floor((overlapEnd.getTime() - overlapStart.getTime()) / 86400000) + 1;
+      const leaveSpanDays =
+        Math.floor((leave.endDate.getTime() - leave.startDate.getTime()) / 86400000) + 1;
+
+      approvedLeaveDays += leave.totalDays * (overlapDays / leaveSpanDays);
     }
 
     /* 🔥 FINAL LOGIC */
@@ -177,6 +214,12 @@ export class PayrollService {
       where: { id: payrollId },
       data,
     });
+  }
+
+  /* GET SINGLE PAYROLL BY ID (for ownership checks) */
+
+  async getPayrollById(payrollId: number) {
+    return this.prisma.payroll.findUnique({ where: { id: payrollId } });
   }
 
   /* GET PAYROLL FOR EMPLOYEE */

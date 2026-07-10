@@ -10,7 +10,7 @@ export class SalaryController {
   constructor(private salaryService: SalaryService) {}
 
   @Post('assign')
-  @Roles('HR', 'ADMIN')
+  @Roles('HR', 'ADMIN', 'MANAGER')
   assignSalary(
     @Body()
     body: {

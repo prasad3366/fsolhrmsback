@@ -17,7 +17,7 @@ export class LeaveService {
 
   // ================= CALCULATE DAYS =================
   private calculateDays(start: Date, end: Date, duration: string): number {
-    if (duration === 'HALF_DAY') return 0.5;
+    if (duration === 'HALF_DAY_FIRST' || duration === 'HALF_DAY_SECOND') return 0.5;
 
     const diff = end.getTime() - start.getTime();
     return Math.floor(diff / 86400000) + 1;
@@ -121,7 +121,6 @@ export class LeaveService {
   ) {
     const leave = await this.prisma.leave.findUnique({
       where: { id: leaveId },
-      include: { employee: { include: { user: true } } },
     });
 
     if (!leave) throw new NotFoundException('Leave not found');
@@ -136,11 +135,8 @@ export class LeaveService {
 
     if (!approver) throw new BadRequestException('Approver not found');
 
-    const isReportingManager =
-      leave.employee.reportingManager === approver.user.email;
-
     const canApprove =
-      isReportingManager || approverRole === 'HR' || approverRole === 'ADMIN';
+      approverRole === 'HR' || approverRole === 'ADMIN' || approverRole === 'MANAGER';
 
     if (!canApprove)
       throw new BadRequestException('Unauthorized to approve leave');
@@ -180,7 +176,6 @@ export class LeaveService {
   ) {
     const leave = await this.prisma.leave.findUnique({
       where: { id },
-      include: { employee: { include: { user: true } } },
     });
 
     if (!leave) throw new NotFoundException('Leave not found');
@@ -192,11 +187,8 @@ export class LeaveService {
 
     if (!approver) throw new BadRequestException('Approver not found');
 
-    const isReportingManager =
-      leave.employee.reportingManager === approver.user.email;
-
     const canApprove =
-      isReportingManager || approverRole === 'HR' || approverRole === 'ADMIN';
+      approverRole === 'HR' || approverRole === 'ADMIN' || approverRole === 'MANAGER';
 
     if (!canApprove)
       throw new BadRequestException('Unauthorized to reject leave');
