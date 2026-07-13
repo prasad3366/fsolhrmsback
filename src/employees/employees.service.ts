@@ -201,23 +201,31 @@ export class EmployeesService {
 
     // Check if employee is being set to INACTIVE or exit date is being set
     let shouldDeactivateCredentials = false;
+    let shouldReactivateCredentials = false;
 
     // If status is being changed to INACTIVE OR if already INACTIVE
     const newStatus = dto.status || employee.status;
-    if (newStatus === 'INACTIVE') {
-      shouldDeactivateCredentials = true;
-    }
 
-    // If dateOfExit is being set to today or in the past
-    if (dto.dateOfExit) {
-      const exitDate = new Date(dto.dateOfExit);
+    // Effective exit date after this update (dto.dateOfExit may explicitly clear it with null)
+    const effectiveDateOfExit =
+      dto.dateOfExit !== undefined ? dto.dateOfExit : employee.dateOfExit;
+    let exitInPastOrToday = false;
+    if (effectiveDateOfExit) {
+      const exitDate = new Date(effectiveDateOfExit);
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       exitDate.setHours(0, 0, 0, 0);
+      exitInPastOrToday = exitDate <= today;
+    }
 
-      if (exitDate <= today) {
-        shouldDeactivateCredentials = true;
-      }
+    if (newStatus === 'INACTIVE' || exitInPastOrToday) {
+      shouldDeactivateCredentials = true;
+    } else if (
+      (dto.status !== undefined || dto.dateOfExit !== undefined) &&
+      newStatus === 'ACTIVE'
+    ) {
+      // Employee is explicitly being (re)activated and has no past exit date
+      shouldReactivateCredentials = true;
     }
 
     // update linked user record where applicable
@@ -225,9 +233,11 @@ export class EmployeesService {
     if (dto.email !== undefined) userUpdateData.email = dto.email;
     if (dto.role !== undefined) userUpdateData.role = dto.role;
 
-    // Deactivate credentials if needed
+    // Deactivate/reactivate credentials if needed
     if (shouldDeactivateCredentials) {
       userUpdateData.isActive = false;
+    } else if (shouldReactivateCredentials) {
+      userUpdateData.isActive = true;
     }
 
     // Update user if there are changes OR if credentials need to be deactivated
@@ -329,6 +339,8 @@ export class EmployeesService {
     let message = 'Employee details updated successfully';
     if (shouldDeactivateCredentials) {
       message += ' | Employee credentials have been deactivated (isActive: false).';
+    } else if (shouldReactivateCredentials) {
+      message += ' | Employee credentials have been reactivated (isActive: true).';
     }
 
     return {
