@@ -140,9 +140,9 @@ The method does not accept or use:
 - take
 - cursor
 
-9. fetchPendingLeaves() IN src/hooks/useLeave.ts
+9. PENDING-LEAVE FETCHING IN src/hooks/useLeave.ts
 
-The frontend file src/hooks/useLeave.ts was not present in the available workspace. The adjacent frontened directory was also checked, but no matching useLeave.ts, fetchPendingLeaves, /leaves/pending, or /leaves/history implementation was found.
+The frontend file src/hooks/useLeave.ts was not present in the available workspace. The adjacent frontend directory was also checked, but no matching useLeave.ts, fetchPendingLeaves, /leaves/pending, or /leaves/history implementation was found.
 
 Therefore, the exact frontend combination logic cannot be verified from the available files.
 
