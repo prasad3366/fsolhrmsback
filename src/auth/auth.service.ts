@@ -8,6 +8,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import * as jwtLib from 'jsonwebtoken';
+import { SignOptions } from 'jsonwebtoken';
 import { MailService } from '../mail/mail.service';
 
 @Injectable()
@@ -35,23 +37,24 @@ export class AuthService {
       role: user.role,
     };
 
-    const accessToken = this.jwt.sign(
-      payload as any,
-      {
-        expiresIn: process.env.JWT_ACCESS_EXPIRY as string,
-      } as any,
-    );
+    const accessOptions: SignOptions = {
+      expiresIn: (process.env.JWT_ACCESS_EXPIRY as SignOptions['expiresIn']) || '1d',
+    };
 
-    const refreshToken = this.jwt.sign(
-      payload as any,
-      {
-        expiresIn: process.env.JWT_REFRESH_EXPIRY as string,
-        secret: process.env.JWT_REFRESH_SECRET,
-      } as any,
-    );
+    const accessToken = this.jwt.sign(payload as any, accessOptions);
 
-    // store hashed refresh token
-    const hashed = await bcrypt.hash(refreshToken, 10);
+    // Sign refresh token explicitly with refresh secret to avoid relying on module defaults
+    const refreshSecret = (process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET) as jwtLib.Secret;
+    const refreshOptions: jwtLib.SignOptions = {
+      expiresIn: (process.env.JWT_REFRESH_EXPIRY as jwtLib.SignOptions['expiresIn']) || '7d',
+    };
+
+    // cast to any to avoid overload resolution issues in some @types/jsonwebtoken versions
+    const refreshToken = (jwtLib as any).sign(payload as any, refreshSecret, refreshOptions);
+
+    // store hashed refresh token (bcrypt rounds configurable via env)
+    const bcryptRounds = Number(process.env.BCRYPT_ROUNDS) || 10;
+    const hashed = await bcrypt.hash(refreshToken, bcryptRounds);
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -93,12 +96,17 @@ export class AuthService {
   // ---------- REFRESH ----------
   async refreshToken(token: string) {
     try {
-      const payload = this.jwt.verify(token, {
-        secret: process.env.JWT_REFRESH_SECRET,
-      });
+      // Verify refresh token with explicit refresh secret
+      const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
+      const payload = jwtLib.verify(token, refreshSecret as string) as any;
+
+      const userId = Number(payload.sub);
+      if (Number.isNaN(userId)) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
 
       const user = await this.prisma.user.findUnique({
-        where: { id: payload.sub },
+        where: { id: userId },
         include: { employee: true },
       });
 
@@ -172,7 +180,8 @@ export class AuthService {
       if (user.resetOtpExpires < new Date())
         throw new BadRequestException('OTP expired');
 
-      const hashed = await bcrypt.hash(newPassword, 10);
+      const bcryptRounds = Number(process.env.BCRYPT_ROUNDS) || 10;
+      const hashed = await bcrypt.hash(newPassword, bcryptRounds);
       await this.prisma.user.update({
         where: { email },
         data: {

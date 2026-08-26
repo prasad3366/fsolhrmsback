@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   Patch,
@@ -38,8 +39,25 @@ export class LeaveController {
   }
 
   @Get('history')
-  history(@Req() req) {
-    return this.service.leaveHistory(req.user.role, req.user.employeeId);
+  history(@Req() req, @Query('page') page?: string, @Query('limit') limit?: string) {
+    const parsedPage = page === undefined ? 1 : Number(page);
+    const parsedLimit = limit === undefined ? 10 : Number(limit);
+
+    if (
+      !Number.isInteger(parsedPage) ||
+      parsedPage < 1 ||
+      !Number.isInteger(parsedLimit) ||
+      parsedLimit < 1
+    ) {
+      throw new BadRequestException('page and limit must be positive integers');
+    }
+
+    return this.service.leaveHistory(
+      req.user.role,
+      req.user.employeeId,
+      parsedPage,
+      parsedLimit,
+    );
   }
 
   @Get('pending')
