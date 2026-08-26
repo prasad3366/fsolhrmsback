@@ -15,7 +15,8 @@ async function main() {
     console.log('Admin user already exists. Skipping creation.');
   } else {
     const password = 'admin123';
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const bcryptRounds = Number(process.env.BCRYPT_ROUNDS) || 10;
+    const hashedPassword = await bcrypt.hash(password, bcryptRounds);
 
     const adminUser = await prisma.user.create({
       data: {

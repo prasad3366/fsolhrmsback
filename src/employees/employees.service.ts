@@ -33,7 +33,8 @@ export class EmployeesService {
     }
 
     const rawPassword = this.generatePassword();
-    const hashedPassword = await bcrypt.hash(rawPassword, 10);
+    const bcryptRounds = Number(process.env.BCRYPT_ROUNDS) || 10;
+    const hashedPassword = await bcrypt.hash(rawPassword, bcryptRounds);
 
     const user = await this.prisma.user.create({
       data: {

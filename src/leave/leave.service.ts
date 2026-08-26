@@ -231,25 +231,46 @@ export class LeaveService {
   }
 
   // ================= LEAVE HISTORY =================
-  async leaveHistory(role: string, employeeId: number) {
-    return this.prisma.leave.findMany({
-      where: {
-        ...(role === 'EMPLOYEE' && { employeeId }),
-      },
-      include: {
-        employee: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            empCode: true,
-            user: { select: { email: true } },
+  async leaveHistory(
+    role: string,
+    employeeId: number,
+    page: number = 1,
+    limit: number = 10,
+  ) {
+    const where = {
+      ...(role === 'EMPLOYEE' && { employeeId }),
+    };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.leave.findMany({
+        where,
+        include: {
+          employee: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              empCode: true,
+              user: { select: { email: true } },
+            },
           },
+          leaveType: true,
         },
-        leaveType: true,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.leave.count({ where }),
+    ]);
+
+    return {
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
       },
-      orderBy: { createdAt: 'desc' },
-    });
+    };
   }
 
   // ================= PENDING REQUESTS =================

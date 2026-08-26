@@ -33,8 +33,13 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       });
 
       // 3️⃣ Attach user to request
+      const userId = Number(payload.sub);
+      if (Number.isNaN(userId)) {
+        throw new UnauthorizedException('Invalid token payload');
+      }
+
       const user = await this.prisma.user.findUnique({
-        where: { id: payload.sub },
+        where: { id: userId },
         include: { employee: true },
       });
 

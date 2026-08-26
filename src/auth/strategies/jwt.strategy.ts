@@ -20,8 +20,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
   async validate(payload: any) {
     // ⭐ payload.sub = userId
+    const userId = Number(payload.sub);
+    if (Number.isNaN(userId)) {
+      throw new UnauthorizedException('Invalid token payload');
+    }
+
     const user = await this.prisma.user.findUnique({
-      where: { id: payload.sub },
+      where: { id: userId },
       include: { employee: true },
     });
 
