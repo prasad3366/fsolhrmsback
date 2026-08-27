@@ -5,6 +5,7 @@ import {
   Req,
   Get,
   Param,
+  Query,
   UseGuards,
   BadRequestException,
 } from '@nestjs/common';
@@ -67,6 +68,16 @@ export class AttendanceController {
   // HR / ADMIN / MANAGER
   // VIEW EMPLOYEE ATTENDANCE
   // ============================
+  @Get('employee/:id/summary')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'HR', 'MANAGER')
+  getEmployeeSummary(
+    @Param('id') id: string,
+    @Query('month') month: string,
+  ) {
+    return this.service.getEmployeeMonthlySummary(Number(id), month);
+  }
+
   @Get('employee/:id')
   @UseGuards(RolesGuard)
   @Roles('ADMIN', 'HR', 'MANAGER')
