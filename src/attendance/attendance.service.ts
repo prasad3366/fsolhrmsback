@@ -1,4 +1,8 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PunchType, AttendanceStatus } from '@prisma/client';
 import { distanceMeters } from './utils/geo.util';
@@ -155,6 +159,143 @@ export class AttendanceService {
       where: { employeeId },
       orderBy: { date: 'desc' },
     });
+  }
+
+  async getEmployeeMonthlySummary(employeeId: number, month: string) {
+    if (!Number.isInteger(employeeId) || employeeId < 1) {
+      throw new BadRequestException('Invalid employee ID');
+    }
+
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month || '')) {
+      throw new BadRequestException('Month must use YYYY-MM format');
+    }
+
+    const [yearText, monthText] = month.split('-');
+    const year = Number(yearText);
+    const monthIndex = Number(monthText) - 1;
+
+    if (year < 1) {
+      throw new BadRequestException('Month must use YYYY-MM format');
+    }
+
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { id: true },
+    });
+
+    if (!employee) throw new NotFoundException('Employee not found');
+
+    const monthStart = new Date(year, monthIndex, 1);
+    const monthEnd = new Date(year, monthIndex + 1, 0, 23, 59, 59, 999);
+    const dateKey = (date: Date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+    const calendarDates: Date[] = [];
+    for (
+      let date = new Date(year, monthIndex, 1);
+      date <= monthEnd;
+      date.setDate(date.getDate() + 1)
+    ) {
+      calendarDates.push(new Date(date));
+    }
+
+    const holidayResults = await Promise.all(
+      calendarDates.map((date) => this.holidayService.isHoliday(date)),
+    );
+    const holidayKeys = new Set(
+      holidayResults.filter(Boolean).map((holiday) => dateKey(holiday!.date)),
+    );
+
+    const workingDateKeys = new Set(
+      calendarDates
+        .filter((date) => date.getDay() !== 0 && date.getDay() !== 6)
+        .filter((date) => !holidayKeys.has(dateKey(date)))
+        .map(dateKey),
+    );
+
+    const [attendanceRecords, approvedLeaves] = await Promise.all([
+      this.prisma.attendance.findMany({
+        where: {
+          employeeId,
+          date: { gte: monthStart, lte: monthEnd },
+        },
+      }),
+      this.prisma.leave.findMany({
+        where: {
+          employeeId,
+          status: 'APPROVED',
+          startDate: { lte: monthEnd },
+          endDate: { gte: monthStart },
+        },
+      }),
+    ]);
+
+    const leaveDateKeys = new Set<string>();
+    let leaveDays = 0;
+
+    for (const leave of approvedLeaves) {
+      const overlapStart = leave.startDate > monthStart ? leave.startDate : monthStart;
+      const overlapEnd = leave.endDate < monthEnd ? leave.endDate : monthEnd;
+      const overlapDays =
+        Math.floor((overlapEnd.getTime() - overlapStart.getTime()) / 86400000) + 1;
+      const leaveSpanDays =
+        Math.floor((leave.endDate.getTime() - leave.startDate.getTime()) / 86400000) + 1;
+
+      if (overlapDays <= 0 || leaveSpanDays <= 0) continue;
+
+      leaveDays +=
+        leave.durationType === 'FULL_DAY'
+          ? overlapDays
+          : leave.totalDays * (overlapDays / leaveSpanDays);
+
+      for (
+        let date = new Date(overlapStart.getFullYear(), overlapStart.getMonth(), overlapStart.getDate());
+        date <= overlapEnd;
+        date.setDate(date.getDate() + 1)
+      ) {
+        leaveDateKeys.add(dateKey(date));
+      }
+    }
+
+    const attendanceByDate = new Map(
+      attendanceRecords.map((record) => [dateKey(record.date), record]),
+    );
+
+    let presentDays = 0;
+    let halfDays = 0;
+    let absentDays = 0;
+
+    for (const key of workingDateKeys) {
+      if (leaveDateKeys.has(key)) continue;
+
+      const record = attendanceByDate.get(key);
+      if (record?.status === AttendanceStatus.PRESENT) {
+        presentDays += 1;
+      } else if (record?.status === AttendanceStatus.HALF_DAY) {
+        halfDays += 1;
+      } else {
+        absentDays += 1;
+      }
+    }
+
+    const workingDays = workingDateKeys.size;
+    const presentEquivalentDays = presentDays + halfDays * 0.5;
+    const attendancePercentage =
+      workingDays === 0
+        ? 0
+        : Math.round((presentEquivalentDays / workingDays) * 10000) / 100;
+
+    return {
+      employeeId,
+      month,
+      workingDays,
+      presentDays,
+      halfDays,
+      leaveDays,
+      absentDays,
+      presentEquivalentDays,
+      attendancePercentage,
+    };
   }
 
   async setOfficeLocation(dto: OfficeLocationDto) {
