@@ -219,162 +219,132 @@ export class AttendanceService {
   }
 
   async getAttendanceHistory(
-  userId: number,
-  month?: number,
-  year?: number,
-  status?: AttendanceStatus,
-  page?: number,
-  pageSize?: number,
-) {
-  const shouldPaginate = page !== undefined || pageSize !== undefined;
-  const normalizedPage = page ?? 1;
-  const normalizedPageSize = pageSize ?? 10;
-
-  const paginate = (records: any[], resultMonth: number, resultYear: number) => {
-    if (!shouldPaginate) return records;
-
-    const total = records.length;
-    const totalPages = Math.ceil(total / normalizedPageSize);
-    const start = (normalizedPage - 1) * normalizedPageSize;
-
-    return {
-      data: records
-        .slice()
-        .sort((left, right) => right.date.getTime() - left.date.getTime())
-        .slice(start, start + normalizedPageSize),
-      meta: {
-        page: normalizedPage,
-        pageSize: normalizedPageSize,
-        total,
-        totalPages,
-        month: resultMonth,
-        year: resultYear,
-      },
-    };
-  };
-
-  const employee = await this.prisma.employee.findUnique({
-    where: { userId },
-    select: { id: true },
-  });
-
-  if (!employee) {
-    return shouldPaginate
-      ? paginate([], month ?? new Date().getMonth() + 1, year ?? new Date().getFullYear())
-      : [];
-  }
-
-  // Read attendance from the existing production Attendance table.
-  // Attendance:
-  //   employeeId -> Employee.id
-  //   punchIn   -> clockIn
-  //   punchOut  -> clockOut
-  const attendanceRecords = await this.prisma.attendance.findMany({
-    where: {
-      employeeId: employee.id,
-      ...(month && year
-        ? {
-            date: {
-              gte: new Date(year, month - 1, 1),
-              lt: new Date(year, month, 1),
-            },
-          }
-        : {}),
-    },
-    orderBy: { date: 'asc' },
-  });
-
-  const records = attendanceRecords.map((record) => ({
-    id: record.id,
-    userId,
-    date: record.date,
-    clockIn: record.punchIn,
-    clockOut: record.punchOut,
-    totalHours: record.totalHours,
-    status: record.status,
-    isLate: false,
-    isEarlyCheckout: false,
-    ipAddress: null,
-    notes: null,
-  }));
-
-  // If no month/year was requested, return the actual attendance records.
-  if (!month || !year) {
-    const filteredRecords = status
-      ? records.filter((record) => record.status === status)
-      : records;
-
-    return filteredRecords;
-  }
-
-  const monthStart = new Date(year, month - 1, 1);
-  const nextMonthStart = new Date(year, month, 1);
-  const monthEnd = new Date(nextMonthStart.getTime() - 1);
-
-  const today = new Date();
-  const todayEnd = new Date(
-    today.getFullYear(),
-    today.getMonth(),
-    today.getDate(),
-    23,
-    59,
-    59,
-    999,
-  );
-
-  const isCurrentMonth =
-    year === today.getFullYear() &&
-    month === today.getMonth() + 1;
-
-  if (monthStart > todayEnd) {
-    return paginate([], month, year);
-  }
-
-  const calculationEndDate = monthEnd < todayEnd ? monthEnd : todayEnd;
-
-  const monthDates: Date[] = [];
-
-  for (
-    let date = new Date(year, month - 1, 1);
-    date <= calculationEndDate;
-    date.setDate(date.getDate() + 1)
+    userId: number,
+    month?: number,
+    year?: number,
+    status?: AttendanceStatus,
+    page?: number,
+    pageSize?: number,
   ) {
-    monthDates.push(new Date(date));
+    const shouldPaginate = page !== undefined || pageSize !== undefined;
+    const normalizedPage = page ?? 1;
+    const normalizedPageSize = pageSize ?? 10;
+
+    const paginate = (records: any[], resultMonth: number, resultYear: number) => {
+      if (!shouldPaginate) return records;
+
+      const total = records.length;
+      const totalPages = Math.ceil(total / normalizedPageSize);
+      const start = (normalizedPage - 1) * normalizedPageSize;
+      return {
+        data: records
+          .slice()
+          .sort((left, right) => right.date.getTime() - left.date.getTime())
+          .slice(start, start + normalizedPageSize),
+        meta: {
+          page: normalizedPage,
+          pageSize: normalizedPageSize,
+          total,
+          totalPages,
+          month: resultMonth,
+          year: resultYear,
+        },
+      };
+    };
+
+    if (!month || !year) {
+      return this.prisma.attendanceRecord.findMany({
+        where: { userId, ...(status && { status }) },
+        orderBy: { date: 'asc' },
+      });
+    }
+
+    const monthStart = new Date(year, month - 1, 1);
+    const nextMonthStart = new Date(year, month, 1);
+    const monthEnd = new Date(nextMonthStart.getTime() - 1);
+    const today = new Date();
+    const todayEnd = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate(),
+      23,
+      59,
+      59,
+      999,
+    );
+    const isCurrentMonth =
+      year === today.getFullYear() && month === today.getMonth() + 1;
+    if (monthStart > todayEnd) return shouldPaginate
+      ? paginate([], month, year)
+      : [];
+    const calculationEndDate = monthEnd < todayEnd ? monthEnd : todayEnd;
+    const dateRange = isCurrentMonth
+      ? { gte: monthStart, lte: calculationEndDate }
+      : { gte: monthStart, lt: nextMonthStart };
+    const employee = this.prisma.employee?.findUnique
+      ? await this.prisma.employee.findUnique({
+          where: { userId },
+          select: { id: true },
+        })
+      : null;
+    if (!employee) {
+      const records = await this.prisma.attendanceRecord.findMany({
+        where: {
+          userId,
+          date: dateRange,
+          ...(status && { status }),
+        },
+        orderBy: { date: 'asc' },
+      });
+      const filteredRecords = status
+        ? records.filter((record) => record.status === status)
+        : records;
+      return paginate(filteredRecords, month, year);
+    }
+
+    const records = await this.prisma.attendanceRecord.findMany({
+      where: {
+        userId,
+        date: dateRange,
+      },
+      orderBy: { date: 'asc' },
+    });
+
+    const monthDates: Date[] = [];
+    for (
+      let date = new Date(year, month - 1, 1);
+      date <= calculationEndDate;
+      date.setDate(date.getDate() + 1)
+    ) {
+      monthDates.push(new Date(date));
+    }
+
+    const dateKey = (date: Date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const recordDates = new Set(records.map((record) => dateKey(record.date)));
+    const workingDates = await this.workingDaysService.getWorkingDates(
+      employee.id,
+      monthDates,
+    );
+    const inferredAbsences = workingDates
+      .filter((date) => !recordDates.has(dateKey(date)))
+      .map((date) => ({
+        userId,
+        date,
+        clockIn: null,
+        clockOut: null,
+        totalHours: 0,
+        status: AttendanceStatus.ABSENT,
+      }));
+    const allRecords = [...records, ...inferredAbsences].sort(
+      (left, right) => left.date.getTime() - right.date.getTime(),
+    );
+
+    const filteredRecords = status
+      ? allRecords.filter((record) => record.status === status)
+      : allRecords;
+    return paginate(filteredRecords, month, year);
   }
-
-  const dateKey = (date: Date) =>
-    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-
-  const recordDates = new Set(
-    records.map((record) => dateKey(record.date)),
-  );
-
-  const workingDates = await this.workingDaysService.getWorkingDates(
-    employee.id,
-    monthDates,
-  );
-
-  const inferredAbsences = workingDates
-    .filter((date) => !recordDates.has(dateKey(date)))
-    .map((date) => ({
-      userId,
-      date,
-      clockIn: null,
-      clockOut: null,
-      totalHours: 0,
-      status: AttendanceStatus.ABSENT,
-    }));
-
-  const allRecords = [...records, ...inferredAbsences].sort(
-    (left, right) => left.date.getTime() - right.date.getTime(),
-  );
-
-  const filteredRecords = status
-    ? allRecords.filter((record) => record.status === status)
-    : allRecords;
-
-  return paginate(filteredRecords, month, year);
-}
 
   async requestRegularization(dto: any, userId: number, userEmail: string) {
     const requestedClockIn = new Date(dto.requestedClockIn);
@@ -561,51 +531,65 @@ export class AttendanceService {
 
   // ⭐ PUNCH OUT
   async punchOut(employeeId: number, lat?: number, lng?: number) {
-  await this.requireActiveEmployee(employeeId);
+    await this.requireActiveEmployee(employeeId);
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { userId: true, user: { select: { email: true } } },
+    });
+    if (!employee) throw new NotFoundException('Employee not found');
+    return await this.prisma.$transaction(async (tx) => {
+      if (tx.attendanceRecord) {
+        const result = await this.clockOutWithClient(
+          tx,
+          employee.userId,
+          new Date(),
+          employee.user?.email ?? '',
+        );
+        await tx.attendanceLog.create({
+          data: { employeeId, type: 'OUT', time: result.clockOut },
+        });
+        return result;
+      }
 
-  const date = this.attendanceDate();
-
-  const record = await this.prisma.attendance.findUnique({
-    where: {
-      employeeId_date: {
-        employeeId,
-        date,
-      },
-    },
-  });
-
-  if (!record) {
-    throw new NotFoundException('Today attendance record not found');
+      const date = this.attendanceDate();
+      const dayEnd = new Date(date);
+      dayEnd.setHours(23, 59, 59, 999);
+      const record = tx.attendance.findFirst
+        ? await tx.attendance.findFirst({
+            where: { employeeId, date: { gte: date, lte: dayEnd } },
+            orderBy: { date: 'desc' },
+          })
+        : await tx.attendance.findUnique({
+            where: { employeeId_date: { employeeId, date } },
+          });
+      const punchOut = new Date();
+      if (!record) {
+        await tx.attendanceLog.create({ data: { employeeId, type: 'OUT' } });
+        return tx.attendance.upsert({
+          where: { employeeId_date: { employeeId, date } },
+          update: { punchOut, punchOutLat: lat, punchOutLng: lng, totalHours: 0 },
+          create: {
+            employeeId,
+            date,
+            punchIn: punchOut,
+            punchOut,
+            punchOutLat: lat,
+            punchOutLng: lng,
+            totalHours: 0,
+          },
+        });
+      }
+      if (record.punchOut) throw new BadRequestException('Already clocked out');
+      const totalHours = record.punchIn
+        ? (punchOut.getTime() - record.punchIn.getTime()) / 3600000
+        : 0;
+      await tx.attendanceLog.create({ data: { employeeId, type: 'OUT' } });
+      return tx.attendance.update({
+        where: { id: record.id },
+        data: { punchOut, punchOutLat: lat, punchOutLng: lng, totalHours },
+      });
+    });
   }
-
-  if (record.punchOut) {
-    throw new BadRequestException('Already clocked out');
-  }
-
-  const punchOut = new Date();
-
-  const totalHours = record.punchIn
-    ? (punchOut.getTime() - record.punchIn.getTime()) / 3600000
-    : 0;
-
-  await this.prisma.attendanceLog.create({
-    data: {
-      employeeId,
-      type: 'OUT',
-      time: punchOut,
-    },
-  });
-
-  return this.prisma.attendance.update({
-    where: { id: record.id },
-    data: {
-      punchOut,
-      punchOutLat: lat,
-      punchOutLng: lng,
-      totalHours,
-    },
-  });
- }  
 
   getAll() {
     return this.prisma.attendanceRecord.findMany({
@@ -845,27 +829,25 @@ export class AttendanceService {
   }
 
   async getTodayAttendance(employeeId: number) {
-  await this.requireActiveEmployee(employeeId);
+    await this.requireActiveEmployee(employeeId);
 
-  const today = this.today();
-
-  const record = await this.prisma.attendance.findUnique({
-    where: {
-      employeeId_date: {
-        employeeId,
-        date: today,
-      },
-    },
-  });
-
-  return {
-    hasPunchedIn: !!record?.punchIn,
-    hasPunchedOut: !!record?.punchOut,
-    punchInTime: record?.punchIn || null,
-    punchOutTime: record?.punchOut || null,
-    locationStatus: record?.locationStatus || null,
-    totalHours: record?.totalHours || 0,
-    status: record?.status || null,
-  };
-}
+    const today = this.today();
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { userId: true },
+    });
+    if (!employee) throw new NotFoundException('Employee not found');
+    const record = await this.prisma.attendanceRecord.findUnique({
+      where: { userId_date: { userId: employee.userId, date: today } },
+    });
+    return {
+      hasPunchedIn: !!record?.clockIn,
+      hasPunchedOut: !!record?.clockOut,
+      punchInTime: record?.clockIn || null,
+      punchOutTime: record?.clockOut || null,
+      locationStatus: null,
+      totalHours: record?.totalHours || 0,
+      status: record?.status || null,
+    };
+  }
 }

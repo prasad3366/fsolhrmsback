@@ -33,4 +33,4 @@ CREATE UNIQUE INDEX "announcement_reads_announcementId_employeeId_key" ON "annou
 ALTER TABLE "announcement_reads" ADD CONSTRAINT "announcement_reads_announcementId_fkey" FOREIGN KEY ("announcementId") REFERENCES "announcements"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "announcement_reads" ADD CONSTRAINT "announcement_reads_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "employees"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "announcement_reads" ADD CONSTRAINT "announcement_reads_employeeId_fkey" FOREIGN KEY ("employeeId") REFERENCES "Employee"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
