@@ -5,6 +5,7 @@ import {
   IsEnum,
   IsDateString,
   IsNumber,
+  IsBoolean,
 } from 'class-validator';
 import {
   Role,
@@ -16,22 +17,22 @@ import {
 
 export class CreateEmployeeDto {
   @IsEmail()
-  email!: string;
+  declare email: string;
 
   @IsEnum(Role)
-  role!: Role;
+  declare role: Role;
 
   @IsString()
-  empCode!: string;
+  declare empCode: string;
 
   @IsString()
-  firstName!: string;
+  declare firstName: string;
 
   @IsString()
-  lastName!: string;
+  declare lastName: string;
 
   @IsString()
-  department!: string;
+  declare department: string;
 
   @IsString()
   designation!: string;
@@ -45,6 +46,7 @@ export class CreateEmployeeDto {
   status?: EmployeeStatus;
 
   @IsOptional()
+  @IsString()
   sourceOfHire?: string;
 
   @IsOptional()
@@ -52,15 +54,19 @@ export class CreateEmployeeDto {
   dateOfJoining?: Date;
 
   @IsOptional()
+  @IsNumber()
   currentExperience?: number;
 
   @IsOptional()
+  @IsString()
   reportingManager?: string;
 
   @IsOptional()
+  @IsDateString()
   dateOfBirth?: Date;
 
   @IsOptional()
+  @IsNumber()
   age?: number;
 
   @IsOptional()
@@ -68,15 +74,19 @@ export class CreateEmployeeDto {
   gender?: Gender;
 
   @IsOptional()
+  @IsString()
   currentAddress?: string;
 
   @IsOptional()
+  @IsString()
   permanentAddress?: string;
 
   @IsOptional()
+  @IsString()
   pincode?: string;
 
   @IsOptional()
+  @IsString()
   city?: string;
 
   @IsOptional()
@@ -84,35 +94,70 @@ export class CreateEmployeeDto {
   maritalStatus?: MaritalStatus;
 
   @IsOptional()
+  @IsString()
   phone?: string;
 
   @IsOptional()
+  @IsString()
   personalMobile?: string;
 
   @IsOptional()
+  @IsString()
   panNumber?: string;
 
   @IsOptional()
+  @IsString()
   aadharNumber?: string;
 
   @IsOptional()
+  @IsString()
   pfNumber?: string;
 
   @IsOptional()
+  @IsString()
   uanNumber?: string;
 
   @IsOptional()
+  @IsString()
   bankAccountNumber?: string;
 
   @IsOptional()
+  @IsString()
   bankName?: string;
 
   @IsOptional()
+  @IsString()
   ifscCode?: string;
 
   @IsOptional()
+  @IsDateString()
   dateOfExit?: Date;
 
   @IsOptional()
+  @IsBoolean()
   isExperienced?: boolean;
+}
+
+export class UpdateEmployeeDto extends CreateEmployeeDto {
+  @IsOptional()
+  @IsEmail()
+  declare email: string;
+
+  @IsOptional()
+  declare role: Role;
+
+  @IsOptional()
+  declare empCode: string;
+
+  @IsOptional()
+  declare firstName: string;
+
+  @IsOptional()
+  declare lastName: string;
+
+  @IsOptional()
+  declare department: string;
+
+  @IsOptional()
+  declare designation: string;
 }

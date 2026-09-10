@@ -9,6 +9,8 @@ import {
   UseGuards,
   BadRequestException,
   Req,
+  ForbiddenException,
+  UnauthorizedException,
 } from '@nestjs/common';
 
 import { PayrollService } from './payroll.service';
@@ -18,6 +20,7 @@ import { PayslipService } from './payslip.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorators';
+import { AuthorizationService } from '../common/authorization/authorization.service';
 
 import type { Response, Request } from 'express';
 
@@ -27,22 +30,33 @@ export class PayrollController {
   constructor(
     private payrollService: PayrollService,
     private payslipService: PayslipService,
+    private readonly authorizationService: AuthorizationService,
   ) {}
+
+  private requireAuthenticatedEmployee(req: Request): any {
+    const user = req.user as any;
+
+    if (!user || !user.role || !user.employeeId) {
+      throw new UnauthorizedException('Employee profile required');
+    }
+
+    return user;
+  }
 
   /* Generate payroll manually */
 
   @Post('run')
-  @Roles('ADMIN', 'HR', 'MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
   runPayroll(@Body() dto: RunPayrollDto) {
     return this.payrollService.runPayroll(dto);
   }
 
-  /* Manual "Generate Payslip" action for HR/Admin/Manager -
+  /* Manual "Generate Payslip" action for org-wide finance/HR roles -
      runs payroll for the period if it hasn't been run yet, then
      returns the payslip PDF directly. */
 
   @Post('generate-payslip')
-  @Roles('ADMIN', 'HR', 'MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
   async generatePayslipManually(
     @Body() dto: RunPayrollDto,
     @Res() res: Response,
@@ -54,7 +68,7 @@ export class PayrollController {
   /* Add allowance or deduction */
 
   @Post('others')
-  @Roles('ADMIN', 'HR', 'MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
   addOther(
     @Body()
     body: {
@@ -64,31 +78,50 @@ export class PayrollController {
       amount: number;
     },
   ) {
-    if (!body.payrollId || !body.name || !body.amount) {
+    const payrollId = Number(body.payrollId);
+    const amount = Number(body.amount);
+
+    if (!Number.isInteger(payrollId) || payrollId <= 0) {
+      throw new BadRequestException('Invalid payrollId');
+    }
+
+    if (!body.name || !String(body.name).trim()) {
       throw new BadRequestException('Invalid adjustment data');
     }
 
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('Adjustment amount must be a positive number');
+    }
+
     return this.payrollService.addOther(
-      body.payrollId,
+      payrollId,
       body.name,
       body.type,
-      body.amount,
+      amount,
     );
   }
 
   /* Get payroll for specific employee */
 
   @Get()
-  @Roles('ADMIN', 'HR', 'MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
   getPayroll(@Query('employeeId') employeeId: number) {
-    if (!employeeId) {
-      throw new BadRequestException('employeeId is required');
+    const parsedEmployeeId = Number(employeeId);
+
+    if (!Number.isInteger(parsedEmployeeId) || parsedEmployeeId <= 0) {
+      throw new BadRequestException('employeeId is required and must be a positive integer');
     }
 
-    return this.payrollService.getPayroll(Number(employeeId));
+    return this.payrollService.getPayroll(parsedEmployeeId);
   }
 
-  /* Download payslip - HR/Admin/Manager can download anyone's, an employee only their own */
+  @Get('unassigned-employees')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
+  getEmployeesWithoutSalary() {
+    return this.payrollService.getEmployeesWithoutSalary();
+  }
+
+  /* Payslips are available to org-wide payroll roles, while employees may only access their own */
 
   @Get('payslip/:id')
   async downloadPayslip(
@@ -100,14 +133,31 @@ export class PayrollController {
       throw new BadRequestException('Invalid payroll id');
     }
 
-    const user = req.user as any;
-    const canViewAny = ['ADMIN', 'HR', 'MANAGER'].includes(user?.role);
+    const user = this.requireAuthenticatedEmployee(req);
+    const role = String(user.role).toUpperCase();
+    const isOrgWideRole = [
+      'SUPER_ADMIN',
+      'CEO',
+      'HR',
+      'FINANCE_MANAGER',
+    ].includes(role);
 
-    if (!canViewAny) {
-      const payroll = await this.payrollService.getPayrollById(Number(id));
-      if (!payroll || payroll.employeeId !== user?.employeeId) {
-        throw new BadRequestException('Payslip not found');
-      }
+    if (isOrgWideRole) {
+      return this.payslipService.generatePayslip(Number(id), res);
+    }
+
+    const payroll = await this.payrollService.getPayrollById(Number(id));
+    if (!payroll) {
+      throw new BadRequestException('Payslip not found');
+    }
+
+    const hasAccess = await this.authorizationService.canAccessEmployee(
+      user,
+      payroll.employeeId,
+    );
+
+    if (!hasAccess) {
+      throw new ForbiddenException('Access denied');
     }
 
     return this.payslipService.generatePayslip(Number(id), res);
@@ -117,12 +167,18 @@ export class PayrollController {
 
   @Get('my')
   async getMyPayroll(@Req() req: Request) {
-    const user = req.user as any;
+    const user = this.requireAuthenticatedEmployee(req);
+    const employeeId = Number(user.employeeId);
 
-    if (!user || !user.employeeId) {
-      throw new BadRequestException('User does not have an employee profile');
+    const hasAccess = await this.authorizationService.canAccessEmployee(
+      user,
+      employeeId,
+    );
+
+    if (!hasAccess) {
+      throw new ForbiddenException('Access denied');
     }
 
-    return this.payrollService.getPayroll(user.employeeId);
+    return this.payrollService.getPayroll(employeeId);
   }
 }

@@ -7,20 +7,223 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum AnnouncementPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum AnnouncementAudience {
+  ALL
+  DEPARTMENT
+  TEAM
+}
+
+model SystemSetting {
+  id                 Int      @id @default(1)
+  companyName        String   @default("FooDeeZ")
+  companyLogo        String?
+  companyEmail       String   @default("hr@foodeez.com")
+  companyPhone       String?
+  companyAddress     String?  @db.Text
+  timeZone           String   @default("Asia/Kolkata")
+  currency           String   @default("INR")
+  financialYearStart String   @default("April")
+  dateFormat         String   @default("DD/MM/YYYY")
+  timeFormat         String   @default("12H")
+  updatedAt          DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+model RolePermission {
+  id         Int      @id @default(autoincrement())
+  roleName   String
+  moduleName String
+  canView    Boolean  @default(true)
+  canCreate  Boolean  @default(false)
+  canEdit    Boolean  @default(false)
+  canDelete  Boolean  @default(false)
+  canApprove Boolean  @default(false)
+  canExport  Boolean  @default(false)
+  updatedAt  DateTime @updatedAt
+
+  @@unique([roleName, moduleName])
+  @@map("role_permissions")
+}
+
+model AttendancePolicy {
+  id                   Int      @id @default(1)
+  workDays             String   @default("MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY")
+  shiftStartTime       String   @default("09:00")
+  shiftEndTime         String   @default("18:00")
+  gracePeriodMins      Int      @default(15)
+  lateArrivalThreshold Int      @default(30)
+  earlyCheckoutMins    Int      @default(30)
+  halfDayHours         Float    @default(4.0)
+  autoCheckoutEnabled  Boolean  @default(true)
+  autoCheckoutTime     String   @default("22:00")
+  overtimeEnabled      Boolean  @default(false)
+  updatedAt            DateTime @updatedAt
+
+  @@map("attendance_policies")
+}
+
+model AttendanceRecord {
+  id              Int      @id @default(autoincrement())
+  userId          Int
+  userEmail       String
+  date            DateTime @db.Date
+  clockIn         DateTime
+  clockOut        DateTime?
+  totalHours      Float?
+  status          AttendanceStatus @default(PRESENT)
+  isLate          Boolean  @default(false)
+  isEarlyCheckout Boolean  @default(false)
+  ipAddress       String?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  regularizations AttendanceRegularization[]
+
+  @@unique([userId, date])
+  @@map("attendance_records")
+}
+
+model AttendanceRegularization {
+  id                Int      @id @default(autoincrement())
+  attendanceRecordId Int
+  userId            Int
+  userEmail         String
+  requestedClockIn  DateTime
+  requestedClockOut DateTime
+  reason            String   @db.Text
+  status            RegularizationStatus @default(PENDING)
+  approvedBy        String?
+  rejectionReason   String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  attendanceRecord   AttendanceRecord @relation(fields: [attendanceRecordId], references: [id], onDelete: Cascade)
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("attendance_regularizations")
+}
+
+model LeavePolicy {
+  id               Int      @id @default(autoincrement())
+  leaveTypeName    String   @unique
+  code             String   @unique
+  annualAllocation Int      @default(12)
+  accrualFrequency String   @default("MONTHLY")
+  carryForwardMax  Int      @default(0)
+  allowHalfDay     Boolean  @default(true)
+  requiresDocument Boolean  @default(false)
+  isLossOfPay      Boolean  @default(false)
+  updatedAt        DateTime @updatedAt
+
+  @@map("leave_policies")
+}
+
+model EmployeeSetting {
+  id                Int      @id @default(1)
+  empIdPrefix       String   @default("FDZ-")
+  empIdNextNumber   Int      @default(1001)
+  probationDays     Int      @default(90)
+  noticePeriodDays  Int      @default(30)
+  requireOnboarding Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
+
+  @@map("employee_settings")
+}
+
+model SecurityPolicy {
+  id                 Int      @id @default(1)
+  minPasswordLength  Int      @default(8)
+  requireUppercase   Boolean  @default(true)
+  requireNumbers     Boolean  @default(true)
+  requireSymbols     Boolean  @default(true)
+  maxFailedLogins    Int      @default(5)
+  accountLockMins    Int      @default(30)
+  sessionTimeoutMins Int      @default(60)
+  enable2FA          Boolean  @default(false)
+  updatedAt          DateTime @updatedAt
+
+  @@map("security_policies")
+}
+
+model ApprovalWorkflow {
+  id             Int      @id @default(autoincrement())
+  module         String   @unique
+  approvalLevels Int      @default(1)
+  requireComment Boolean  @default(true)
+  updatedAt      DateTime @updatedAt
+
+  @@map("approval_workflows")
+}
+
+model NotificationSetting {
+  id                   Int      @id @default(1)
+  notifyLeaveRequest   Boolean  @default(true)
+  notifyLeaveApproval  Boolean  @default(true)
+  notifyLateAttendance Boolean  @default(false)
+  notifyAnniversaries  Boolean  @default(true)
+  notifyNewJoiner      Boolean  @default(true)
+  emailChannelEnabled  Boolean  @default(true)
+  inAppChannelEnabled  Boolean  @default(true)
+  updatedAt            DateTime @updatedAt
+
+  @@map("notification_settings")
+}
+
+model Branch {
+  id             Int      @id @default(autoincrement())
+  name           String
+  code           String   @unique
+  city           String
+  state          String?
+  country        String   @default("India")
+  isHeadquarters Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@map("branches")
+}
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  userId      Int?
+  userEmail   String
+  action      String
+  module      String
+  ipAddress   String?
+  previousVal String?  @db.Text
+  newVal      String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
 model User {
-  id              Int       @id @default(autoincrement())
-  email           String    @unique
+  id              Int              @id @default(autoincrement())
+  email           String           @unique
   password        String
   role            Role
-  isActive        Boolean   @default(true)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
   refreshToken    String?
   resetOtp        String?
   resetOtpExpires DateTime?
+  failedLoginAttempts Int      @default(0)
+  lockedUntil         DateTime?
   assets          Asset[]
-  helpdeskTickets HelpdeskTicket[]
+  assetAssignments AssetAssignment[]
   employee        Employee?
+  helpdeskTickets HelpdeskTicket[]
+  attendanceRecords AttendanceRecord[]
+  attendanceRegularizations AttendanceRegularization[]
+  announcements     Announcement[]
 }
 
 model Employee {
@@ -59,20 +262,54 @@ model Employee {
   sourceOfHire      String?
   status            EmployeeStatus     @default(ACTIVE)
   uanNumber         String?
+  teamId            Int?
   attendances       Attendance[]
   logs              AttendanceLog[]
+  team              Team?              @relation("TeamMembers", fields: [teamId], references: [id])
   user              User               @relation(fields: [userId], references: [id])
   documents         EmployeeDocument[]
   salaries          EmployeeSalary[]
+  helpdeskTickets   HelpdeskTicket[]
   leaves            Leave[]
   leaveBalances     LeaveBalance[]
   payrolls          Payroll[]
+  managedTeam       Team[]             @relation("TeamManager")
   wfhRequests       WFHRequest[]
-  helpdeskTickets   HelpdeskTicket[]
-  teamId Int?
-  team   Team? @relation("TeamMembers", fields: [teamId], references: [id])
-  managedTeam Team[] @relation("TeamManager")
+  trainingEnrollments TrainingEnrollment[]
+  announcementReads AnnouncementRead[]
+  performanceGoals  PerformanceGoal[]
+  appraisalReviews   AppraisalReview[] @relation("EmployeeAppraisals")
+  uploadedDocuments  Document[]
+
   @@index([teamId])
+}
+
+model PerformanceGoal {
+  id          Int                     @id @default(autoincrement())
+  employeeId  Int
+  title       String
+  description String?
+  category    PerformanceGoalCategory @default(INDIVIDUAL)
+  status      PerformanceGoalStatus   @default(NOT_STARTED)
+  progress    Int                     @default(0)
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  employee    Employee                @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+}
+
+model AppraisalReview {
+  id          Int                   @id @default(autoincrement())
+  employeeId  Int
+  reviewerId  Int
+  cycleName   String
+  status      AppraisalReviewStatus @default(DRAFT)
+  rating      Float?
+  feedback    String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  employee    Employee              @relation("EmployeeAppraisals", fields: [employeeId], references: [id], onDelete: Cascade)
 }
 
 model OfficeLocation {
@@ -83,7 +320,7 @@ model OfficeLocation {
   radius    Float
   createdAt DateTime @default(now())
 }
-   
+
 model Attendance {
   id             Int              @id @default(autoincrement())
   employeeId     Int
@@ -126,17 +363,17 @@ model WFHRequest {
 }
 
 model HelpdeskTicket {
-  id         Int              @id @default(autoincrement())
+  id         Int            @id @default(autoincrement())
   userId     Int?
   employeeId Int
   issue      String
   reason     String
-  status     HelpdeskStatus   @default(PENDING)
-  createdAt  DateTime         @default(now())
-  updatedAt  DateTime         @updatedAt
+  status     HelpdeskStatus @default(PENDING)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
   resolvedAt DateTime?
-  user       User?            @relation(fields: [userId], references: [id])
-  employee   Employee         @relation(fields: [employeeId], references: [id])
+  employee   Employee       @relation(fields: [employeeId], references: [id])
+  user       User?          @relation(fields: [userId], references: [id])
 }
 
 model LeaveType {
@@ -180,6 +417,7 @@ model Leave {
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
   isEmergency        Boolean           @default(false)
+  isLossOfPay        Boolean           @default(false)
   medicalCertificate String?
   employee           Employee          @relation(fields: [employeeId], references: [id])
   leaveType          LeaveType         @relation(fields: [leaveTypeId], references: [id])
@@ -190,11 +428,13 @@ model Leave {
 
 model Holiday {
   id          Int      @id @default(autoincrement())
+  title       String   @default("")
   name        String
   date        DateTime
   description String?
   isOptional  Boolean  @default(false)
   location    String?
+  branchId    Int?
   createdAt   DateTime @default(now())
 
   @@unique([date, location])
@@ -224,9 +464,21 @@ model EmployeeDocument {
   uploadedAt     DateTime       @default(now())
   documentType   DocumentType   @relation(fields: [documentTypeId], references: [id])
   employee       Employee       @relation(fields: [employeeId], references: [id])
-  
 
   @@unique([employeeId, documentTypeId])
+  @@index([employeeId])
+}
+
+model Document {
+  id           Int      @id @default(autoincrement())
+  title        String
+  fileUrl      String
+  documentType String
+  employeeId   Int
+  uploadedAt   DateTime @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
   @@index([employeeId])
 }
 
@@ -240,6 +492,7 @@ model SalaryStructure {
   healthInsurance   Float            @default(0)
   createdAt         DateTime         @default(now())
   conveyancePercent Float            @default(15)
+  pfBase            Float            @default(0)
   salaries          EmployeeSalary[]
 }
 
@@ -308,26 +561,167 @@ model Asset {
   returnedAt  DateTime?
   status      String    @default("ASSIGNED")
   user        User?     @relation(fields: [assignedTo], references: [id])
+  assignments AssetAssignment[]
 }
+
+model AssetAssignment {
+  id           Int       @id @default(autoincrement())
+  assetId      Int
+  assignedTo   Int
+  assignedAt   DateTime
+  unassignedAt DateTime?
+  createdAt    DateTime  @default(now())
+  asset        Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  user         User      @relation(fields: [assignedTo], references: [id])
+
+  @@index([assetId, unassignedAt])
+  @@index([assignedTo])
+}
+
 model Team {
-  id        Int      @id @default(autoincrement())
-  name      String
-
-  managerId Int
-  manager   Employee @relation("TeamManager", fields: [managerId], references: [id])
-
-  members   Employee[] @relation("TeamMembers")
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  id           Int           @id @default(autoincrement())
+  name         String
+  managerId    Int
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt
+  members      Employee[]    @relation("TeamMembers")
+  manager      Employee      @relation("TeamManager", fields: [managerId], references: [id])
+  announcements Announcement[] @relation("AnnouncementTeam")
 
   @@index([managerId])
 }
 
+model JobPosting {
+  id           Int       @id @default(autoincrement())
+  title        String
+  department   String
+  teamId       Int?
+  description  String
+  requirements String
+  openings     Int       @default(1)
+  status       JobStatus @default(OPEN)
+  createdById  Int
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  candidates Candidate[]
+
+  @@map("job_postings")
+}
+
+model Candidate {
+  id           Int             @id @default(autoincrement())
+  jobPostingId Int
+  fullName     String
+  email        String
+  phone        String
+  resumeUrl    String?
+  status       CandidateStatus @default(APPLIED)
+  notes        String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  jobPosting JobPosting @relation(fields: [jobPostingId], references: [id], onDelete: Cascade)
+  interviews Interview[]
+
+  @@map("candidates")
+}
+
+model Interview {
+  id            Int             @id @default(autoincrement())
+  candidateId   Int
+  interviewerId Int
+  scheduledAt   DateTime
+  round         String
+  feedback      String?
+  rating        Int?
+  status        InterviewStatus @default(SCHEDULED)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@map("interviews")
+}
+
+model TrainingProgram {
+  id          Int            @id @default(autoincrement())
+  title       String
+  description String
+  trainer     String
+  department  String?
+  startDate   DateTime
+  endDate     DateTime
+  status      TrainingStatus @default(UPCOMING)
+  createdById Int
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  enrollments TrainingEnrollment[]
+
+  @@map("training_programs")
+}
+
+model TrainingEnrollment {
+  id                Int              @id @default(autoincrement())
+  trainingProgramId Int
+  employeeId        Int
+  status            EnrollmentStatus @default(ENROLLED)
+  completedAt       DateTime?
+  feedback          String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  trainingProgram TrainingProgram @relation(fields: [trainingProgramId], references: [id], onDelete: Cascade)
+  employee        Employee        @relation(fields: [employeeId], references: [id])
+
+  @@unique([trainingProgramId, employeeId])
+  @@map("training_enrollments")
+}
+
+model Announcement {
+  id               Int                  @id @default(autoincrement())
+  title            String
+  content          String               @db.Text
+  category         String               @default("General")
+  priority         AnnouncementPriority @default(LOW)
+  targetAudience   AnnouncementAudience @default(ALL)
+  departmentId     String?
+  targetDepartment String?
+  teamId           Int?
+  team             Team?                @relation("AnnouncementTeam", fields: [teamId], references: [id])
+  isPinned         Boolean              @default(false)
+  expiresAt        DateTime?
+  createdById      Int
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  reads            AnnouncementRead[]
+  createdBy        User                 @relation(fields: [createdById], references: [id])
+
+  @@map("announcements")
+}
+
+model AnnouncementRead {
+  id             Int          @id @default(autoincrement())
+  announcementId Int
+  employeeId     Int
+  readAt         DateTime     @default(now())
+
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+
+  @@unique([announcementId, employeeId])
+  @@map("announcement_reads")
+}
+
 enum Role {
-  ADMIN
+  SUPER_ADMIN
+  CEO
   HR
-  MANAGER
+  FINANCE_MANAGER
+  IT_MANAGER
+  SALES_MANAGER
   EMPLOYEE
 }
 
@@ -355,8 +749,16 @@ enum Gender {
 
 enum AttendanceStatus {
   PRESENT
+  LATE
   HALF_DAY
   ABSENT
+  ON_LEAVE
+}
+
+enum RegularizationStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 enum PunchType {
@@ -416,4 +818,59 @@ enum PayrollStatus {
 enum AdjustmentType {
   ALLOWANCE
   DEDUCTION
+}
+
+enum JobStatus {
+  DRAFT
+  OPEN
+  CLOSED
+}
+
+enum CandidateStatus {
+  APPLIED
+  SCREENING
+  INTERVIEW
+  OFFERED
+  HIRED
+  REJECTED
+}
+
+enum InterviewStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+enum TrainingStatus {
+  UPCOMING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum EnrollmentStatus {
+  ENROLLED
+  IN_PROGRESS
+  COMPLETED
+  DROPPED
+}
+
+enum PerformanceGoalCategory {
+  INDIVIDUAL
+  TEAM
+  COMPANY
+}
+
+enum PerformanceGoalStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum AppraisalReviewStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  COMPLETED
 }

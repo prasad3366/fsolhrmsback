@@ -1,4 +1,10 @@
-import { IsDateString, IsOptional, IsString } from 'class-validator';
+import {
+  IsDateString,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+} from 'class-validator';
 
 export class RequestWfhDto {
   @IsDateString()
@@ -9,5 +15,7 @@ export class RequestWfhDto {
 
   @IsOptional()
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   reason?: string;
 }

@@ -1,7 +1,16 @@
-import { IsInt, IsOptional, IsString } from 'class-validator';
+import {
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+  Min,
+} from 'class-validator';
 
 export class CreateAssetDto {
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   name!: string;
 
   @IsOptional()
@@ -10,5 +19,6 @@ export class CreateAssetDto {
 
   @IsOptional()
   @IsInt()
+  @Min(1)
   assignedTo?: number;
 }

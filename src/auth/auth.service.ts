@@ -25,6 +25,14 @@ export class AuthService {
     return `/dashboard/${role.toLowerCase()}`;
   }
 
+  private requireEnv(name: string): string {
+    const value = process.env[name];
+    if (!value || value.trim() === '') {
+      throw new Error(`${name} environment variable is required`);
+    }
+    return value;
+  }
+
   // ---------- TOKEN GENERATOR ----------
   private async generateTokens(user: {
     id: number;
@@ -37,14 +45,22 @@ export class AuthService {
       role: user.role,
     };
 
+    const securityPolicy = await this.prisma.securityPolicy.upsert({
+      where: { id: 1 },
+      create: { id: 1 },
+      update: {},
+      select: { sessionTimeoutMins: true },
+    });
     const accessOptions: SignOptions = {
-      expiresIn: (process.env.JWT_ACCESS_EXPIRY as SignOptions['expiresIn']) || '1d',
+      expiresIn: securityPolicy.sessionTimeoutMins > 0
+        ? `${securityPolicy.sessionTimeoutMins}m`
+        : (process.env.JWT_ACCESS_EXPIRY as SignOptions['expiresIn']) || '1d',
     };
 
     const accessToken = this.jwt.sign(payload as any, accessOptions);
 
     // Sign refresh token explicitly with refresh secret to avoid relying on module defaults
-    const refreshSecret = (process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET) as jwtLib.Secret;
+    const refreshSecret = this.requireEnv('JWT_REFRESH_SECRET') as jwtLib.Secret;
     const refreshOptions: jwtLib.SignOptions = {
       expiresIn: (process.env.JWT_REFRESH_EXPIRY as jwtLib.SignOptions['expiresIn']) || '7d',
     };
@@ -75,13 +91,43 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      throw new UnauthorizedException('Account temporarily locked');
+    }
+
     // Check if employee status is INACTIVE
     if (user.employee && user.employee.status === 'INACTIVE') {
       throw new UnauthorizedException('Your account has been deactivated. Please contact HR.');
     }
 
     const match = await bcrypt.compare(password, user.password);
-    if (!match) throw new UnauthorizedException('Invalid credentials');
+    if (!match) {
+      const securityPolicy = await this.prisma.securityPolicy.upsert({
+        where: { id: 1 },
+        create: { id: 1 },
+        update: {},
+        select: { maxFailedLogins: true, accountLockMins: true },
+      });
+      const failedLoginAttempts = (user.failedLoginAttempts ?? 0) + 1;
+      const shouldLock = failedLoginAttempts >= securityPolicy.maxFailedLogins;
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          failedLoginAttempts,
+          lockedUntil: shouldLock
+            ? new Date(Date.now() + securityPolicy.accountLockMins * 60_000)
+            : null,
+        },
+      });
+      throw new UnauthorizedException(
+        shouldLock ? 'Account temporarily locked' : 'Invalid credentials',
+      );
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { failedLoginAttempts: 0, lockedUntil: null },
+    });
 
     const tokens = await this.generateTokens(user);
 
@@ -97,7 +143,7 @@ export class AuthService {
   async refreshToken(token: string) {
     try {
       // Verify refresh token with explicit refresh secret
-      const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
+      const refreshSecret = this.requireEnv('JWT_REFRESH_SECRET');
       const payload = jwtLib.verify(token, refreshSecret as string) as any;
 
       const userId = Number(payload.sub);

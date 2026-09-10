@@ -22,7 +22,7 @@ async function main() {
       data: {
         email: 'admin@example.com',
         password: hashedPassword,
-        role: 'ADMIN',
+        role: 'SUPER_ADMIN',
         isActive: true,
       },
     });
@@ -71,6 +71,25 @@ async function main() {
   }
 
   console.log('✅ Leave types created/updated successfully!');
+
+  const salaryStructureCount = await prisma.salaryStructure.count();
+  if (salaryStructureCount === 0) {
+    await prisma.salaryStructure.create({
+      data: {
+        name: 'Default Salary Structure',
+        basicPercent: 35,
+        hraPercent: 50,
+        pfPercent: 12,
+        conveyancePercent: 15,
+        ptAmount: 200,
+        healthInsurance: 0,
+        pfBase: 0,
+      },
+    });
+    console.log('✅ Default salary structure created.');
+  } else {
+    console.log('Salary structures already exist. Skipping default creation.');
+  }
 }
 
 main()

@@ -2,12 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { PayrollCalculator } from './payroll.calculator';
+import { WorkingDaysService } from '../common/working-days/working-days.service';
 
 @Injectable()
 export class PayrollScheduler {
   private readonly logger = new Logger(PayrollScheduler.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private workingDaysService: WorkingDaysService,
+  ) {}
 
   /**
    * Runs at 00:00 on the 29th of every month to auto-generate payslips
@@ -62,40 +66,19 @@ export class PayrollScheduler {
           continue;
         }
 
-        /* Holidays */
-
-        const holidayData = await this.prisma.holiday.findMany({
-          where: {
-            date: { gte: startDate, lte: endDate },
-          },
-        });
-
-        const holidays = holidayData?.map((h) => h.date) || [];
-
         /* Working Days */
 
-        let workingDays = 0;
-
-        for (
-          let d = new Date(startDate);
-          d <= endDate;
-          d.setDate(d.getDate() + 1)
-        ) {
-          const day = d.getDay();
-          const isWeekend = day === 0 || day === 6;
-
-          const isHoliday = holidays.some(
-            (h) => h.toDateString() === d.toDateString(),
-          );
-
-          if (!isWeekend && !isHoliday) workingDays++;
+        const dates: Date[] = [];
+        for (let date = new Date(startDate); date <= endDate; date.setDate(date.getDate() + 1)) {
+          dates.push(new Date(date));
         }
+        const workingDays = (await this.workingDaysService.getWorkingDates(emp.id, dates)).length;
 
         /* Attendance */
 
-        const attendanceRecords = await this.prisma.attendance.findMany({
+        const attendanceRecords = await this.prisma.attendanceRecord.findMany({
           where: {
-            employeeId: emp.id,
+            userId: emp.userId,
             date: { gte: startDate, lte: endDate },
           },
         });
@@ -103,7 +86,7 @@ export class PayrollScheduler {
         let presentDays = 0;
 
         for (const att of attendanceRecords) {
-          if (att?.status === 'PRESENT') presentDays += 1;
+          if (att?.status === 'PRESENT' || att?.status === 'LATE') presentDays += 1;
           if (att?.status === 'HALF_DAY') presentDays += 0.5;
         }
 

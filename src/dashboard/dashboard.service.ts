@@ -1,5 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
+import { AuthorizationService } from '../common/authorization/authorization.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { HolidaysService } from '../holidays/holidays.service';
+import { WorkingDaysService } from '../common/working-days/working-days.service';
 
 interface RequestUser {
   role: string;
@@ -16,30 +19,55 @@ interface AttendanceReportRow {
 
 @Injectable()
 export class DashboardService {
-  constructor(private prisma: PrismaService) {}
+  private readonly authorizationService: AuthorizationService;
 
-  /* HR/Admin see every employee; a manager only sees their own team's members */
+  constructor(
+    private prisma: PrismaService,
+    private readonly workingDaysService: WorkingDaysService = new WorkingDaysService(
+      prisma,
+      new HolidaysService(prisma),
+    ),
+  ) {
+    this.authorizationService = new AuthorizationService(this.prisma);
+  }
 
   private async getEmployeesInScope(user: RequestUser) {
-    if (user.role === 'MANAGER') {
-      if (!user.employeeId) return [];
+    const role = (user?.role ?? '').toUpperCase();
+
+    if (
+      ['SUPER_ADMIN', 'CEO', 'HR'].includes(role) &&
+      this.authorizationService.canAccessOrganizationWide(user as any, 'dashboard')
+    ) {
+      return this.prisma.employee.findMany();
+    }
+
+    if (role === 'IT_MANAGER' || role === 'SALES_MANAGER') {
+      if (!user.employeeId) {
+        throw new ForbiddenException('Access denied');
+      }
 
       const teams = await this.prisma.team.findMany({
         where: { managerId: user.employeeId },
         include: { members: true },
       });
 
-      const membersById = new Map<number, { id: number; empCode: string; firstName: string; lastName: string }>();
+      const membersById = new Map<
+        number,
+        { id: number; empCode: string; firstName: string; lastName: string }
+      >();
+
       for (const team of teams) {
         for (const member of team.members) {
-          membersById.set(member.id, member);
+          if (await this.authorizationService.canAccessEmployee(user as any, member.id)) {
+            membersById.set(member.id, member);
+          }
         }
       }
 
       return [...membersById.values()];
     }
 
-    return this.prisma.employee.findMany();
+    throw new ForbiddenException('Access denied');
   }
 
   async exportAttendanceCsv(month: number, year: number, user: RequestUser) {
@@ -51,14 +79,38 @@ export class DashboardService {
     const employeeIds = employees.map((e) => e.id);
     const startDate = new Date(year, month - 1, 1);
     const endDate = new Date(year, month, 0);
-    const totalDaysInMonth = endDate.getDate();
+    const monthDates: Date[] = [];
+    for (
+      let date = new Date(startDate);
+      date <= endDate;
+      date.setDate(date.getDate() + 1)
+    ) {
+      monthDates.push(new Date(date));
+    }
+    const dateKey = (date: Date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const workingDatesByEmployee = new Map<number, Set<string>>();
+
+    await Promise.all(
+      employees.map(async (employee) => {
+        const workingDates = await this.workingDaysService.getWorkingDates(
+          employee.id,
+          monthDates,
+        );
+        workingDatesByEmployee.set(
+          employee.id,
+          new Set(workingDates.map(dateKey)),
+        );
+      }),
+    );
 
     const [attendanceRecords, leaves] = await Promise.all([
-      this.prisma.attendance.findMany({
+      this.prisma.attendanceRecord.findMany({
         where: {
-          employeeId: { in: employeeIds },
+          user: { employee: { id: { in: employeeIds } } },
           date: { gte: startDate, lte: endDate },
         },
+        include: { user: { include: { employee: true } } },
       }),
       this.prisma.leave.findMany({
         where: {
@@ -72,26 +124,42 @@ export class DashboardService {
 
     const presentDaysByEmployee = new Map<number, number>();
     for (const att of attendanceRecords) {
-      const current = presentDaysByEmployee.get(att.employeeId) || 0;
-      if (att.status === 'PRESENT') {
-        presentDaysByEmployee.set(att.employeeId, current + 1);
+      const employeeId = att.user.employee?.id;
+      if (!employeeId || !workingDatesByEmployee.get(employeeId)?.has(dateKey(att.date))) {
+        continue;
+      }
+      const current = presentDaysByEmployee.get(employeeId) || 0;
+      if (att.status === 'PRESENT' || att.status === 'LATE') {
+        presentDaysByEmployee.set(employeeId, current + 1);
       } else if (att.status === 'HALF_DAY') {
-        presentDaysByEmployee.set(att.employeeId, current + 0.5);
+        presentDaysByEmployee.set(employeeId, current + 0.5);
       }
     }
 
     const leaveDaysByEmployee = new Map<number, number>();
     for (const leave of leaves) {
-      // Prorate leaves spanning a month boundary so only the days
-      // that fall inside this reporting month are counted.
       const overlapStart = leave.startDate < startDate ? startDate : leave.startDate;
       const overlapEnd = leave.endDate > endDate ? endDate : leave.endDate;
-      const overlapDays =
-        Math.floor((overlapEnd.getTime() - overlapStart.getTime()) / 86400000) + 1;
-      const leaveSpanDays =
-        Math.floor((leave.endDate.getTime() - leave.startDate.getTime()) / 86400000) + 1;
-
-      const proratedDays = leave.totalDays * (overlapDays / leaveSpanDays);
+      const datesBetween = (rangeStart: Date, rangeEnd: Date) => {
+        const dates: Date[] = [];
+        for (
+          let date = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), rangeStart.getDate());
+          date <= rangeEnd;
+          date.setDate(date.getDate() + 1)
+        ) {
+          dates.push(new Date(date));
+        }
+        return dates;
+      };
+      const fullLeaveDates = datesBetween(leave.startDate, leave.endDate);
+      const overlapDates = datesBetween(overlapStart, overlapEnd);
+      const [fullWorkingDates, overlapWorkingDates] = await Promise.all([
+        this.workingDaysService.getWorkingDates(leave.employeeId, fullLeaveDates),
+        this.workingDaysService.getWorkingDates(leave.employeeId, overlapDates),
+      ]);
+      const proratedDays = fullWorkingDates.length
+        ? leave.totalDays * (overlapWorkingDates.length / fullWorkingDates.length)
+        : 0;
       const current = leaveDaysByEmployee.get(leave.employeeId) || 0;
       leaveDaysByEmployee.set(leave.employeeId, current + proratedDays);
     }
@@ -99,7 +167,7 @@ export class DashboardService {
     const rows: AttendanceReportRow[] = employees.map((emp) => ({
       empCode: emp.empCode,
       name: `${emp.firstName} ${emp.lastName}`,
-      totalDays: totalDaysInMonth,
+      totalDays: workingDatesByEmployee.get(emp.id)?.size || 0,
       presentDays: presentDaysByEmployee.get(emp.id) || 0,
       leaveDays: Math.round((leaveDaysByEmployee.get(emp.id) || 0) * 100) / 100,
     }));

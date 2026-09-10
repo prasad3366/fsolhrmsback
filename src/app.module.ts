@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 
@@ -19,6 +20,13 @@ import { AssetsModule } from './assets/assets.module';
 import { HelpdeskModule } from './helpdesk/helpdesk.module';
 import { TeamModule } from './teams/team.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { RecruitmentModule } from './modules/recruitment/recruitment.module';
+import { PrismaModule } from './prisma/prisma.module';
+import { TrainingModule } from './modules/training/training.module';
+import { AnnouncementModule } from './modules/announcement/announcement.module';
+import { ReportsModule } from './modules/reports/reports.module';
+import { SettingsModule } from './modules/settings/settings.module';
+import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 
 @Module({
   imports: [
@@ -40,7 +48,18 @@ import { DashboardModule } from './dashboard/dashboard.module';
     HelpdeskModule,
     TeamModule,
     DashboardModule,
+    RecruitmentModule,
+    PrismaModule,
+    TrainingModule,
+    AnnouncementModule,
+    ReportsModule,
+    SettingsModule,
   ],
-  providers: [PrismaService, WfhScheduler, EmployeeExitScheduler],
+  providers: [
+    PrismaService,
+    WfhScheduler,
+    EmployeeExitScheduler,
+    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+  ],
 })
 export class AppModule {}

@@ -1,10 +1,23 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { ForbiddenException, Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateHelpdeskDto } from './dto/create-helpdesk.dto';
+import {
+  AuthorizationService,
+  AuthorizationUser,
+} from '../common/authorization/authorization.service';
 
 @Injectable()
 export class HelpdeskService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly authorizationService: AuthorizationService,
+  ) {}
+
+  private assertManagementAccess(actor: AuthorizationUser | undefined) {
+    if (!this.authorizationService.canAccessOrganizationWide(actor, 'helpdesk')) {
+      throw new ForbiddenException('Access denied');
+    }
+  }
 
   private async resolveEmployeeId(userId: number) {
     const user = await this.prisma.user.findUnique({
@@ -20,6 +33,15 @@ export class HelpdeskService {
   }
 
   async create(userId: number, dto: CreateHelpdeskDto) {
+    if (
+      typeof dto?.issue !== 'string' ||
+      dto.issue.trim().length === 0 ||
+      typeof dto?.reason !== 'string' ||
+      dto.reason.trim().length === 0
+    ) {
+      throw new BadRequestException('Issue and reason are required');
+    }
+
     const resolvedEmployeeId = await this.resolveEmployeeId(userId);
     const { issue, reason } = dto;
 
@@ -51,45 +73,57 @@ export class HelpdeskService {
     });
   }
 
-  async approve(ticketId: number) {
-    const ticket = await this.prisma.helpdeskTicket.findUnique({
-      where: { id: ticketId },
+  async approve(ticketId: number, actor: AuthorizationUser | undefined) {
+    this.assertManagementAccess(actor);
+
+    const transition = await this.prisma.helpdeskTicket.updateMany({
+      where: { id: ticketId, status: 'PENDING' },
+      data: { status: 'APPROVED' },
     });
 
-    if (!ticket) {
-      throw new BadRequestException('Helpdesk ticket not found');
-    }
+    if (transition.count !== 1) {
+      const ticket = await this.prisma.helpdeskTicket.findUnique({
+        where: { id: ticketId },
+      });
 
-    if (ticket.status !== 'PENDING') {
+      if (!ticket) {
+        throw new BadRequestException('Helpdesk ticket not found');
+      }
+
       throw new BadRequestException(
         `Cannot approve ticket with status ${ticket.status}`,
       );
     }
 
-    return this.prisma.helpdeskTicket.update({
+    return this.prisma.helpdeskTicket.findUnique({
       where: { id: ticketId },
-      data: { status: 'APPROVED' },
     });
   }
 
-  async resolve(ticketId: number) {
-    const ticket = await this.prisma.helpdeskTicket.findUnique({
-      where: { id: ticketId },
+  async resolve(ticketId: number, actor: AuthorizationUser | undefined) {
+    this.assertManagementAccess(actor);
+
+    const transition = await this.prisma.helpdeskTicket.updateMany({
+      where: { id: ticketId, status: 'APPROVED' },
+      data: { status: 'RESOLVED', resolvedAt: new Date() },
     });
 
-    if (!ticket) {
-      throw new BadRequestException('Helpdesk ticket not found');
-    }
+    if (transition.count !== 1) {
+      const ticket = await this.prisma.helpdeskTicket.findUnique({
+        where: { id: ticketId },
+      });
 
-    if (ticket.status !== 'APPROVED') {
+      if (!ticket) {
+        throw new BadRequestException('Helpdesk ticket not found');
+      }
+
       throw new BadRequestException(
         `Cannot resolve ticket with status ${ticket.status}`,
       );
     }
 
-    return this.prisma.helpdeskTicket.update({
+    return this.prisma.helpdeskTicket.findUnique({
       where: { id: ticketId },
-      data: { status: 'RESOLVED', resolvedAt: new Date() },
     });
   }
 

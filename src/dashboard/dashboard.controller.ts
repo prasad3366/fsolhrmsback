@@ -21,11 +21,8 @@ import type { Request, Response } from 'express';
 export class DashboardController {
   constructor(private dashboardService: DashboardService) {}
 
-  /* Quick action: HR/Admin/Manager export the attendance CSV report for a month.
-     Manager scope is limited to their own team's members inside the service. */
-
   @Get('export-attendance')
-  @Roles('ADMIN', 'HR', 'MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER')
   async exportAttendance(
     @Query('month') month: string,
     @Query('year') year: string,

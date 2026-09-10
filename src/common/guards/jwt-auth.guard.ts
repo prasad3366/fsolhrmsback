@@ -27,9 +27,14 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
 
     if (!token) throw new UnauthorizedException('No token found');
 
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret || jwtSecret.trim() === '') {
+      throw new UnauthorizedException('JWT_SECRET environment variable is required');
+    }
+
     try {
       const payload = await this.jwtService.verifyAsync(token, {
-        secret: process.env.JWT_SECRET,
+        secret: jwtSecret,
       });
 
       // 3️⃣ Attach user to request

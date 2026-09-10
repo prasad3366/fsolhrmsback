@@ -1,0 +1,291 @@
+HRMS DOCUMENTS VISIBILITY WORKFLOW FIX REPORT
+==============================================
+
+Date: 2026-09-08
+Scope: Documents visibility and authorization workflow only
+
+1. Executive Summary
+--------------------
+The remaining Documents visibility issue was fixed without changing the existing
+upload mapping, document IDs, stored files, document types, schema, or approval
+workflow.
+
+Management roles now see pending, approved, and rejected document records.
+Employees see only their own approved documents. Employee 360 also returns only
+approved documents for the requested employee.
+
+2. Root Cause
+-------------
+Document retrieval did not explicitly define separate management and employee
+visibility queries.
+
+The previous getDocuments implementation filtered only by employeeId when one
+was provided and otherwise returned all records, but it did not enforce the
+visibility policy inside the service. Employee 360 similarly returned all
+statuses, including pending and rejected metadata.
+
+This made the visibility behavior dependent on the calling path and did not
+provide a clear, server-enforced distinction between:
+
+- management access to all document statuses
+- employee access to only their own approved documents
+- Employee 360 access to approved document metadata only
+
+The upload flow itself was not the cause. Existing upload records continue to
+use employeeId + documentTypeId and preserve the documentTypeId-to-file mapping.
+
+3. Business Rules Implemented
+-----------------------------
+Management roles:
+
+- SUPER_ADMIN: organization-wide document access
+- CEO: organization-wide document access
+- HR: organization-wide document access
+
+Management users can view pending, approved, and rejected records. Visibility
+does not depend on uploadedBy, createdBy, or the current management user.
+
+Employee:
+
+- can read only the authenticated employee's own documents
+- can see only APPROVED documents
+- cannot see pending or rejected documents
+- cannot access another employee's documents
+- cannot upload, replace, edit, approve, reject, or delete documents
+
+Denied roles:
+
+- IT_MANAGER
+- SALES_MANAGER
+- FINANCE_MANAGER
+- unknown or missing role
+
+4. Visibility Queries
+---------------------
+Management query:
+
+- management role is validated server-side
+- optional employeeId scopes the existing selected-employee UI
+- no status filter is applied
+- no uploader filter is applied
+- omitting employeeId returns records for all employees
+
+Employee query:
+
+- employee identity comes from authenticated request.user.employeeId
+- client-supplied employeeId cannot select another employee
+- query filters by authenticated employeeId
+- query filters status = APPROVED
+
+Employee 360 query:
+
+- management roles may view the selected employee's approved metadata
+- EMPLOYEE may view only their own approved metadata
+- pending and rejected records are excluded
+- binary fileData and sensitive internal fields are not returned
+
+5. Files Changed
+----------------
+Backend implementation:
+
+- src/documents/documents.service.ts
+  Added explicit management versus employee visibility rules.
+  Added APPROVED filtering for employee document lists.
+  Added APPROVED filtering for Employee 360 metadata.
+
+Focused backend tests:
+
+- src/documents/documents.service.spec.ts
+  Added management all-status tests, employee approved-only tests, denied-role
+  tests, and mapping/filename integrity coverage.
+
+- src/documents/documents.service.summary.spec.ts
+  Updated Employee 360 tests for approved-only metadata and role restrictions.
+
+- src/documents/documents.controller.spec.ts
+  Added role-matrix tests for management access, employee self-access, employee
+  upload denial, and denied management roles.
+
+Frontend:
+
+No frontend source change was required for this visibility fix. The existing
+Documents page already sends the selected employee for management users and
+uses the authenticated employee identity for employee access. The existing
+Employee 360 page already renders document type, filename, status, submitted
+date, preview, and download actions. The backend now supplies only the records
+permitted by the visibility policy.
+
+6. Upload/Data Integrity Preserved
+----------------------------------
+No upload behavior was changed.
+
+The existing flow remains:
+
+- repeated documentTypeIds are accepted
+- files remain positionally mapped to documentTypeIds
+- each record is keyed by employeeId + documentTypeId
+- duplicate filenames are allowed
+- duplicate filenames do not determine record identity
+- status resets to PENDING when a document type is replaced
+- Experience Letter, Payslip, and Relieving Letter mapping is preserved
+- existing records, files, IDs, and document types are not deleted or reset
+
+7. Focused Test Results
+-----------------------
+Backend focused tests:
+
+- 4 test suites passed
+- 97 tests passed
+
+Covered cases include:
+
+- SUPER_ADMIN management access
+- CEO management access
+- HR management access
+- EMPLOYEE own approved-only access
+- EMPLOYEE cross-employee denial
+- EMPLOYEE upload denial
+- IT_MANAGER denial
+- SALES_MANAGER denial
+- FINANCE_MANAGER denial
+- unknown role denial
+- Employee 360 approved-only metadata
+- management all-status visibility
+- multiple upload mapping
+- duplicate filename handling
+- document type association integrity
+
+Frontend focused tests:
+
+- 1 test file passed
+- 39 tests passed
+
+8. Typecheck and Build Results
+------------------------------
+Frontend typecheck: PASSED
+Frontend production build: PASSED
+Backend production build: PASSED
+Changed-file diagnostics: no errors
+
+The full backend typecheck still reports 14 pre-existing errors in unrelated
+Performance and Salary test files:
+
+- 12 errors in src/performance/performance.service.spec.ts
+- 2 errors in src/salary/salary.controller.spec.ts
+
+No typecheck errors remain in the changed Documents files.
+
+9. Runtime Verification
+-----------------------
+The backend was restarted from the freshly built output before runtime checks.
+Existing database records were used; no records were created, deleted, or
+modified during verification.
+
+Observed pending document:
+
+- employeeId: 4
+- document ID: 1
+- status: PENDING
+
+Management API results for the pending document:
+
+- SUPER_ADMIN: HTTP 200 and pending document visible
+- HR: HTTP 200 and pending document visible
+- CEO: HTTP 200 and pending document visible
+
+Employee 360 results for the same pending document:
+
+- SUPER_ADMIN: HTTP 200, pending document excluded
+- HR: HTTP 200, pending document excluded
+- CEO: HTTP 200, pending document excluded
+
+Denied role results:
+
+- IT_MANAGER management API: HTTP 403
+- SALES_MANAGER management API: HTTP 403
+- FINANCE_MANAGER management API: HTTP 403
+- IT_MANAGER Employee 360: HTTP 403
+- SALES_MANAGER Employee 360: HTTP 403
+- FINANCE_MANAGER Employee 360: HTTP 403
+
+Employee self-access results were also verified:
+
+- own document endpoint: HTTP 200
+- pending documents excluded from employee response
+- cross-employee document request: HTTP 403
+
+10. Conclusion
+--------------
+The Documents visibility workflow now enforces the required server-side policy:
+
+- SUPER_ADMIN, CEO, and HR see management document records across employees,
+  including pending records created by another management user.
+- Employees see only their own approved documents.
+- Employee 360 exposes only approved metadata for the selected employee.
+- Denied roles cannot access management or Employee 360 document APIs.
+- Existing upload mapping, storage, approval, rejection, and document identity
+  behavior remains unchanged.
+
+11. Final Runtime Workflow Verification
+----------------------------------------
+Runtime date: 2026-09-08
+
+The final workflow was exercised using existing employee 7 and existing pending
+document ID 10. The document was not replaced, deleted, or permanently changed.
+Its original PENDING status was restored after the controlled approval/rejection
+checks.
+
+A new management upload was intentionally not executed because the existing
+employee/document-type uniqueness rule would overwrite an existing record. The
+existing pending record is the result of the upload flow, and upload mapping is
+covered by the focused tests without modifying stored data.
+
+Pending state:
+
+- SUPER_ADMIN management list: HTTP 200, pending document visible
+- HR management list: HTTP 200, pending document visible
+- CEO management list: HTTP 200, pending document visible
+- Employee Documents list: HTTP 200, pending document hidden
+- Employee 360: HTTP 200, pending document hidden
+
+Approval transition through the existing HR approval endpoint:
+
+- Approval request: HTTP 200
+- Employee Documents list after approval: HTTP 200, approved document visible
+- Employee 360 after approval: HTTP 200, approved document visible
+
+Rejection transition through the existing HR rejection endpoint:
+
+- Rejection request: HTTP 200
+- Employee Documents list after rejection: HTTP 200, rejected document hidden
+- Employee 360 after rejection: HTTP 200, rejected document hidden
+
+Employee direct mutation attempts:
+
+- Upload: HTTP 403
+- Approve single document: HTTP 403
+- Reject single document: HTTP 403
+- Approve all: HTTP 403
+- Delete attempt: HTTP 404 because no employee document delete route is exposed
+
+Final database state check:
+
+- Document ID 10 restored to PENDING
+- Original document record and file data were preserved
+
+12. Final Verification Results
+------------------------------
+Focused backend Documents tests: 97/97 passed
+Focused frontend API tests: 39/39 passed
+Frontend typecheck: PASSED
+Frontend production build: PASSED
+Backend production build: PASSED
+
+Backend full typecheck remains blocked only by the same 14 unrelated existing
+errors in Performance and Salary test files:
+
+- 12 errors in src/performance/performance.service.spec.ts
+- 2 errors in src/salary/salary.controller.spec.ts
+
+No errors were reported in the changed Documents implementation or focused
+Documents tests.
