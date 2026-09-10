@@ -1,0 +1,238 @@
+EMPLOYEE ATTENDANCE SCOPING AUDIT REPORT
+
+DATE: 2026-09-08
+MODE: READ-ONLY AUDIT
+
+AUDIT SCOPE
+-----------
+Employee Attendance frontend, attendance API wrapper, AttendanceController,
+AttendanceService, JWT identity extraction, AuthorizationService usage, and
+Employee-Team Prisma relationships.
+
+No files were modified during this audit.
+
+CURRENT DATA FLOW
+-----------------
+EmployeeAttendance.tsx
+  -> attendanceService.getAttendanceEmployees(searchTerm)
+  -> ApiService.getAttendanceEmployees(searchQuery)
+  -> GET /api/attendance/employees[?search=...]
+  -> JwtAuthGuard
+  -> RolesGuard
+  -> AttendanceController.getAttendanceEmployees()
+  -> AttendanceService.getAttendanceEmployees()
+  -> scoped Prisma Employee query
+
+FRONTEND TRACE
+--------------
+File:
+  frontened/finalhrmsfront/src/modules/attendance/EmployeeAttendance.tsx
+
+The page calls attendanceService.getAttendanceEmployees(searchTerm).
+
+The page:
+  - loads the employee list when no employee is selected;
+  - debounces non-empty search input for 300ms;
+  - sends the search term to the API;
+  - replaces the displayed employee list with the response;
+  - does not filter employees by designation, team, name, or employee ID on the client;
+  - clears the list after an employee is selected and loads attendance/leave details separately.
+
+File:
+  frontened/finalhrmsfront/src/services/attendanceService.ts
+
+This wrapper delegates directly to ApiService.getAttendanceEmployees().
+
+File:
+  frontened/finalhrmsfront/src/services/api.ts
+
+The current method requests:
+
+  GET /api/attendance/employees
+
+It sends only the optional search query parameter and includes the JWT
+Authorization header through getAuthHeaders().
+
+The response is normalized to support either a raw array or a data envelope.
+
+BACKEND TRACE
+-------------
+File:
+  backend/fsolback/hrms/src/attendance/attendance.controller.ts
+
+Route:
+
+  GET /api/attendance/employees
+
+Allowed roles:
+
+  SUPER_ADMIN, CEO, HR, SALES_MANAGER, IT_MANAGER, EMPLOYEE
+
+The route passes the complete authenticated request and optional search value
+to AttendanceService.getAttendanceEmployees().
+
+File:
+  backend/fsolback/hrms/src/attendance/attendance.service.ts
+
+Current scope resolution:
+
+  SUPER_ADMIN / CEO / HR:
+    where: { status: EmployeeStatus.ACTIVE }
+
+  SALES_MANAGER / IT_MANAGER:
+    1. Extract employeeId from request.user.employeeId.
+    2. Query:
+
+       prisma.team.findMany({
+         where: { managerId: employeeId },
+         select: { id: true },
+       })
+
+    3. Build:
+
+       where: { teamId: { in: assignedTeamIds } }
+
+  EMPLOYEE:
+    where: { id: request.user.employeeId }
+
+  Unknown role or missing identity:
+    ForbiddenException.
+
+Search is applied after scope resolution:
+
+  where: {
+    AND: [scopeWhere, searchConditions],
+  }
+
+Search fields:
+  - Employee.id for numeric input
+  - firstName
+  - lastName
+  - empCode
+
+No designation or job-title condition exists.
+
+AUTHENTICATED IDENTITY
+----------------------
+File:
+  backend/fsolback/hrms/src/auth/strategies/jwt.strategy.ts
+
+JWT validation loads the database User and related Employee and returns:
+
+  {
+    id: user.id,
+    role: user.role,
+    employeeId: user.employee?.id,
+    email: user.email,
+  }
+
+Therefore AttendanceService uses server-derived request.user.employeeId and
+does not trust client-supplied employeeId, teamId, managerId, or role values.
+
+DATABASE RELATIONSHIP
+---------------------
+Prisma schema relationships:
+
+  Employee.teamId -> Team.id
+  Team.managerId -> Employee.id
+
+The manager scope is based on these relations only.
+
+LIVE DATABASE VERIFICATION
+--------------------------
+The requested live query for user tadalaganesh387, including:
+
+  - User and Employee.id
+  - assigned Team rows where Team.managerId matches that Employee.id
+  - Dholu and Bholu teamId/team name
+  - EMP-001, EMP-003, and EMP-006 teamId/team name
+
+could not be executed because the terminal bridge was blocked by an existing
+PowerShell prompt. No live database values were inferred or fabricated.
+
+Therefore the following cannot be conclusively stated from this audit alone:
+
+  - which Team is assigned to tadalaganesh387;
+  - whether teamId 1 is that manager's assigned team;
+  - whether Dholu and Bholu have the expected Sales teamId;
+  - why each screenshot employee appeared or why each Sales employee was absent.
+
+SCREENSHOT DISCREPANCY
+----------------------
+The screenshot showed an /employees response containing employees outside the
+expected Sales scope. The current source code inspected in this audit calls
+/api/attendance/employees instead.
+
+This indicates one of the following runtime possibilities, which requires a
+live Network capture to distinguish:
+
+  1. The browser was using an older frontend bundle that still called /api/employees.
+  2. The browser was connected to a stale frontend dev/build process.
+  3. The request shown in the screenshot came from another page or older session.
+  4. The current attendance endpoint returned unexpected data due to database
+     Team.managerId/teamId relationships.
+
+The current source contains no frontend designation filter, no backend
+designation filter, and no pagination on the attendance endpoint.
+
+ATTENDANCE DETAIL AUTHORIZATION
+-------------------------------
+The monthly and summary attendance routes call the existing server-side
+employee authorization check before loading attendance details.
+
+Managers are allowed only when AuthorizationService.canAccessEmployee() finds
+that the target Employee.teamId belongs to a Team managed by the authenticated
+manager employee ID.
+
+Employees remain self-only.
+
+SEARCH
+------
+Initial list and search use the same endpoint:
+
+  /api/attendance/employees
+
+Search cannot bypass team scope because the Prisma query combines scope and
+search in an AND condition.
+
+OLD ROLE LOGIC
+--------------
+The inspected Employee Attendance route does not use ADMIN or MANAGER roles.
+It uses the approved roles:
+
+  SUPER_ADMIN, CEO, HR, SALES_MANAGER, IT_MANAGER, EMPLOYEE
+
+No designation-based logic was found.
+
+AUDIT CONCLUSION
+----------------
+A source-level authorization bypass was not found in the current code.
+
+The previously observed /employees response is inconsistent with the current
+Employee Attendance API method, which targets /attendance/employees.
+
+The remaining unresolved question is runtime/database state. A live database
+query and browser Network capture are required to determine whether the
+observed list is caused by stale runtime code or incorrect Team.managerId/
+Employee.teamId data.
+
+FILES RESPONSIBLE FOR CURRENT FLOW
+----------------------------------
+  frontened/finalhrmsfront/src/modules/attendance/EmployeeAttendance.tsx
+  frontened/finalhrmsfront/src/services/attendanceService.ts
+  frontened/finalhrmsfront/src/services/api.ts
+  backend/fsolback/hrms/src/attendance/attendance.controller.ts
+  backend/fsolback/hrms/src/attendance/attendance.service.ts
+  backend/fsolback/hrms/src/auth/strategies/jwt.strategy.ts
+  backend/fsolback/hrms/prisma/schema.prisma
+
+RECOMMENDED VERIFICATION SEQUENCE
+---------------------------------
+1. Stop stale frontend/backend processes.
+2. Start the current frontend and backend source runtimes.
+3. Log in as tadalaganesh387.
+4. Confirm Network requests use /api/attendance/employees.
+5. Decode only the non-sensitive JWT identity fields or inspect backend logs.
+6. Query the database for the manager Employee.id and managed Teams.
+7. Query Dholu, Bholu, EMP-001, EMP-003, and EMP-006 team relationships.
+8. Compare the live response with the expected team-scoped Prisma predicate.

@@ -8,11 +8,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { MailModule } from '../mail/mail.module';
 
+const jwtSecret = process.env.JWT_SECRET;
+if (!jwtSecret || jwtSecret.trim() === '') {
+  throw new Error('JWT_SECRET environment variable is required');
+}
+
 @Module({
   imports: [
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.register({
-      secret: process.env.JWT_SECRET || 'jwt_secret',
+      secret: jwtSecret,
       signOptions: { expiresIn: '1d' },
     }),
     MailModule,

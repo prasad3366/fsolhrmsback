@@ -1,54 +1,88 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  BadRequestException,
+  ForbiddenException,
+  forwardRef,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmployeesService } from '../employees/employees.service';
 import { RunPayrollDto } from './dto/run-payroll.dto';
 import { PayrollCalculator } from './payroll.calculator';
+import { WorkingDaysService } from '../common/working-days/working-days.service';
+import {
+  AuthorizationService,
+  AuthorizationUser,
+} from '../common/authorization/authorization.service';
 
 @Injectable()
 export class PayrollService {
   constructor(
     private prisma: PrismaService,
+    @Inject(forwardRef(() => EmployeesService))
     private employeesService: EmployeesService,
+    private authorizationService: AuthorizationService,
+    private workingDaysService: WorkingDaysService,
   ) {}
 
-  /* 🔥 Working Days Calculator */
-
-  calculateWorkingDays(startDate: Date, endDate: Date, holidays: Date[]) {
-    let workingDays = 0;
-
-    for (
-      let d = new Date(startDate);
-      d <= endDate;
-      d.setDate(d.getDate() + 1)
-    ) {
-      const day = d.getDay();
-      const isWeekend = day === 0 || day === 6;
-
-      const isHoliday = holidays.some(
-        (h) => h.toDateString() === d.toDateString(),
-      );
-
-      if (!isWeekend && !isHoliday) {
-        workingDays++;
-      }
+  private async calculateWorkingDays(employeeId: number, startDate: Date, endDate: Date) {
+    const dates: Date[] = [];
+    for (let date = new Date(startDate); date <= endDate; date.setDate(date.getDate() + 1)) {
+      dates.push(new Date(date));
     }
 
-    return workingDays;
+    const workingDates = await this.workingDaysService.getWorkingDates(employeeId, dates);
+    return workingDates.length;
+  }
+
+  private normalizePositiveInteger(value: unknown, fieldName: string): number {
+    const numericValue = Number(value);
+
+    if (!Number.isFinite(numericValue) || !Number.isInteger(numericValue) || numericValue <= 0) {
+      throw new BadRequestException(`Invalid ${fieldName}`);
+    }
+
+    return numericValue;
+  }
+
+  private normalizeMonth(value: unknown): number {
+    const numericValue = Number(value);
+
+    if (!Number.isFinite(numericValue) || !Number.isInteger(numericValue) || numericValue < 1 || numericValue > 12) {
+      throw new BadRequestException('Invalid month');
+    }
+
+    return numericValue;
+  }
+
+  private normalizeYear(value: unknown): number {
+    const numericValue = Number(value);
+
+    if (!Number.isFinite(numericValue) || !Number.isInteger(numericValue) || numericValue < 1) {
+      throw new BadRequestException('Invalid year');
+    }
+
+    return numericValue;
   }
 
   /* Resolve employeeId/empCode + month/year from the request */
 
   private async resolveEmployeeAndPeriod(data: RunPayrollDto) {
-    let employeeId = data.employeeId ? Number(data.employeeId) : undefined;
-    const month = Number(data.month);
-    const year = Number(data.year);
+    let employeeId: number | undefined;
+
+    if (data.employeeId !== undefined && data.employeeId !== null) {
+      employeeId = this.normalizePositiveInteger(data.employeeId, 'employeeId');
+    }
+
+    const month = this.normalizeMonth(data.month);
+    const year = this.normalizeYear(data.year);
 
     if (!employeeId && data.empCode) {
       const employee = await this.employeesService.findByEmpCode(data.empCode);
-      employeeId = employee.id;
+      employeeId = this.normalizePositiveInteger(employee.id, 'employeeId');
     }
 
-    if (!employeeId || !month || !year) {
+    if (!employeeId) {
       throw new BadRequestException('Invalid payroll request');
     }
 
@@ -106,25 +140,15 @@ export class PayrollService {
       throw new BadRequestException('Salary not configured');
     }
 
-    /* 🔥 Holidays */
-
-    const holidayData = await this.prisma.holiday.findMany({
-      where: {
-        date: { gte: startDate, lte: endDate },
-      },
-    });
-
-    const holidays = holidayData.map((h) => h.date);
-
     /* 🔥 Working Days */
 
-    const workingDays = this.calculateWorkingDays(startDate, endDate, holidays);
+    const workingDays = await this.calculateWorkingDays(employeeId, startDate, endDate);
 
     /* 🔥 Attendance */
 
-    const attendanceRecords = await this.prisma.attendance.findMany({
+    const attendanceRecords = await this.prisma.attendanceRecord.findMany({
       where: {
-        employeeId,
+        user: { employee: { id: employeeId } },
         date: { gte: startDate, lte: endDate },
       },
     });
@@ -132,7 +156,7 @@ export class PayrollService {
     let presentDays = 0;
 
     for (const att of attendanceRecords) {
-      if (att.status === 'PRESENT') presentDays += 1;
+      if (att.status === 'PRESENT' || att.status === 'LATE') presentDays += 1;
       if (att.status === 'HALF_DAY') presentDays += 0.5;
     }
 
@@ -169,9 +193,6 @@ export class PayrollService {
     const lopDays = Math.max(workingDays - payableDays, 0);
 
     /* 🔥 Calculation */
-
-    console.log('DEBUG: salary.monthlyCTC =', salary.monthlyCTC);
-    console.log('DEBUG: salary.structure =', salary.structure);
 
     const calc = PayrollCalculator.calculate(
       salary.monthlyCTC,
@@ -239,6 +260,64 @@ export class PayrollService {
     });
   }
 
+  async getEmployeesWithoutSalary() {
+    return this.prisma.employee.findMany({
+      where: {
+        status: 'ACTIVE',
+        salaries: { none: {} },
+      },
+      select: {
+        id: true,
+        empCode: true,
+        firstName: true,
+        lastName: true,
+        department: true,
+        designation: true,
+      },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+    });
+  }
+
+  async getEmployee360PayrollSummary(
+    user: AuthorizationUser,
+    employeeId: number,
+  ) {
+    const hasAccess = await this.authorizationService.canAccessEmployee(
+      user,
+      employeeId,
+    );
+    if (!hasAccess) {
+      throw new ForbiddenException('Access denied');
+    }
+
+    const payrollRecords = await this.prisma.payroll.findMany({
+      where: { employeeId },
+      select: {
+        month: true,
+        year: true,
+        status: true,
+        grossSalary: true,
+        deductions: true,
+        netSalary: true,
+        salary: { select: { effectiveFrom: true } },
+      },
+      orderBy: [
+        { year: 'desc' },
+        { month: 'desc' },
+      ],
+    });
+
+    return payrollRecords.map((payroll) => ({
+      month: payroll.month,
+      year: payroll.year,
+      status: payroll.status,
+      grossSalary: payroll.grossSalary,
+      deductions: payroll.deductions,
+      netSalary: payroll.netSalary,
+      latestSalaryEffectiveDate: payroll.salary.effectiveFrom,
+    }));
+  }
+
   /* ADD ALLOWANCE OR DEDUCTION */
 
   async addOther(
@@ -247,25 +326,52 @@ export class PayrollService {
     type: 'ALLOWANCE' | 'DEDUCTION',
     amount: number,
   ) {
-    if (!payrollId || !name || !amount) {
-      throw new BadRequestException('Invalid adjustment data');
+    const normalizedPayrollId = this.normalizePositiveInteger(payrollId, 'payrollId');
+
+    const normalizedName = String(name ?? '').trim();
+    if (!normalizedName) {
+      throw new BadRequestException('Adjustment name is required');
+    }
+
+    const normalizedType = String(type ?? '').toUpperCase();
+    if (normalizedType !== 'ALLOWANCE' && normalizedType !== 'DEDUCTION') {
+      throw new BadRequestException('Adjustment type must be ALLOWANCE or DEDUCTION');
+    }
+
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      throw new BadRequestException('Adjustment amount must be a positive number');
     }
 
     const payroll = await this.prisma.payroll.findUnique({
-      where: { id: payrollId },
+      where: { id: normalizedPayrollId },
     });
 
     if (!payroll) {
       throw new BadRequestException('Payroll not found');
     }
 
+    if (payroll.status === 'FINALIZED' || payroll.status === 'PAID') {
+      throw new BadRequestException('Payroll is finalized and cannot be modified');
+    }
+
     const newDeductions =
-      payroll.deductions + (type === 'DEDUCTION' ? amount : 0);
-    const newGross = payroll.grossSalary + (type === 'ALLOWANCE' ? amount : 0);
+      payroll.deductions + (normalizedType === 'DEDUCTION' ? numericAmount : 0);
+    const newGross =
+      payroll.grossSalary + (normalizedType === 'ALLOWANCE' ? numericAmount : 0);
     const newNet = newGross - newDeductions;
 
+    await this.prisma.payrollAdjustment.create({
+      data: {
+        payrollId: normalizedPayrollId,
+        name: normalizedName,
+        type: normalizedType as 'ALLOWANCE' | 'DEDUCTION',
+        amount: numericAmount,
+      },
+    });
+
     return this.prisma.payroll.update({
-      where: { id: payrollId },
+      where: { id: normalizedPayrollId },
       data: {
         grossSalary: newGross,
         deductions: newDeductions,

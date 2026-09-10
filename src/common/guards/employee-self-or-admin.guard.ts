@@ -4,39 +4,30 @@ import {
   ExecutionContext,
   ForbiddenException,
 } from '@nestjs/common';
-import { Reflector } from '@nestjs/core';
+import { AuthorizationService } from '../authorization/authorization.service';
 
 @Injectable()
 export class EmployeeSelfOrAdminGuard implements CanActivate {
-  constructor(private reflector: Reflector) {}
+  constructor(private readonly authorizationService: AuthorizationService) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     const user = request.user;
-    const employeeId = request.params.id;
+    const employeeId = request.params?.id;
 
-    // ADMIN and HR can access any employee
-    if (user.role === 'ADMIN' || user.role === 'HR') {
-      return true;
+    if (!employeeId) {
+      throw new ForbiddenException('Employee identifier is required');
     }
 
-    // MANAGER can access any employee details (viewing only)
-    if (user.role === 'MANAGER') {
-      return true;
+    const hasAccess = await this.authorizationService.canAccessEmployee(
+      user,
+      employeeId,
+    );
+
+    if (!hasAccess) {
+      throw new ForbiddenException('Access denied for this employee');
     }
 
-    // EMPLOYEE can only access their own profile
-    if (user.role === 'EMPLOYEE') {
-      const userEmployeeId = user.employeeId;
-      if (
-        userEmployeeId &&
-        userEmployeeId.toString() === employeeId.toString()
-      ) {
-        return true;
-      }
-      throw new ForbiddenException('You can only view your own profile');
-    }
-
-    throw new ForbiddenException('Access denied');
+    return true;
   }
 }

@@ -1,0 +1,427 @@
+ANNOUNCEMENT MODULE AUDIT REPORT
+================================
+
+Date: 2026-09-10
+Scope: Audit only. No code changes, no refactor, no migrations, no implementation.
+
+1. Current Announcement architecture--
+-----------------------------------
+
+Backend module:
+- src/modules/announcement/announcement.module.ts
+- src/modules/announcement/announcement.controller.ts
+- src/modules/announcement/announcement.service.ts
+- src/modules/announcement/dto/create-announcement.dto.ts
+- src/modules/announcement/dto/update-announcement.dto.ts
+- src/modules/announcement/announcement.service.spec.ts
+
+Authentication and guard flow:
+- Controller is guarded by JwtAuthGuard and RolesGuard: src/auth/guards/jwt-auth.guard.ts and src/common/guards/roles.guard.ts.
+- JwtStrategy returns request.user with: id, role, employeeId, email. See src/auth/strategies/jwt.strategy.ts.
+- The current announcement implementation uses request.user fields, but does not use team manager relationships from Team.managerId and Employee.teamId for visibility.
+
+Architecture summary:
+- Announcement is a lightweight module with controller + service only.
+- List/read logic is filtered in the announcement service based on ALL vs DEPARTMENT visibility.
+- Mutations are guarded with RolesGuard role decorators, but there is no announcement-specific ownership or visibility enforcement.
+- There is no announcement detail route by ID.
+- There is no team-scoped announcement policy.
+- There is no role-specific or employee-specific audience model in the current implementation.
+
+2. Current backend endpoints
+----------------------------
+
+Controller: src/modules/announcement/announcement.controller.ts
+
+POST /announcements
+- Auth: JWT required
+- Role requirement: RolesGuard with MANAGEMENT_ROLES = ['SUPER_ADMIN', 'Super_admin', 'CEO', 'HR', 'HR_MANAGER', 'MANAGER', 'IT_MANAGER', 'SALES_MANAGER']
+- Logic: createAnnouncement(dto, req.user)
+- Data returned: Prisma announcement create result
+- Server-side visibility filtering: No
+- Ownership check: No
+- Team scope check: No
+- Client-supplied IDs: Not used in announcement authorization. The service derives audience from role and employee department.
+
+GET /announcements
+- Auth: JWT required
+- Role requirement: None explicitly
+- Logic: getAnnouncements(req.user)
+- Data returned: list of announcements matching the current user's visibility
+- Server-side filtering: Yes
+- Ownership check: No
+- Team scope check: No
+- Client-supplied IDs: No
+
+GET /announcements/feed
+- Auth: JWT required
+- Role requirement: None explicitly
+- Logic: alias of getAnnouncements
+- Data returned: same as list
+- Server-side filtering: Yes
+- Ownership check: No
+- Team scope check: No
+- Client-supplied IDs: No
+
+PATCH /announcements/:id
+- Auth: JWT required
+- Role requirement: MANAGEMENT_ROLES
+- Logic: updateAnnouncement(id, dto)
+- Data returned: Prisma update result
+- Server-side visibility filtering: No
+- Ownership check: No
+- Team scope check: No
+- Client-supplied IDs: No direct authorization from payload; updates by id only
+
+DELETE /announcements/:id
+- Auth: JWT required
+- Role requirement: MANAGEMENT_ROLES
+- Logic: deleteAnnouncement(id)
+- Data returned: Prisma delete result or NotFoundException
+- Server-side visibility filtering: No
+- Ownership check: No
+- Team scope check: No
+- Client-supplied IDs: No
+
+POST /announcements/:id/read
+- Auth: JWT required
+- Role requirement: None explicitly
+- Logic: markAsRead(id, req.user.employeeId)
+- Data returned: createMany on announcementReads
+- Server-side visibility filtering: No
+- Ownership check: No
+- Team scope check: No
+- Client-supplied IDs: Uses authenticated employeeId from JWT, but does not validate the announcement is visible to that employee.
+
+Important note: There is no GET /announcements/:id detail route.
+
+3. Current frontend flow
+------------------------
+
+Frontend workspace inspected:
+- C:\Users\GANESH\Desktop\hrms\frontened\finalhrmsfront
+
+Relevant file:
+- src/pages/AnnouncementsPage.tsx
+- src/App.tsx
+- src/components/layout/Sidebar.tsx
+- src/context/AuthContext.tsx
+- src/services/api.ts
+
+Current role/module visibility:
+- Sidebar includes the Announcements section for all authenticated user roles in the app layout.
+- Route is present in App.tsx without any role allowlist: path="announcements" element={<ProtectedRoute><AnnouncementsPage /></ProtectedRoute>}.
+- So the frontend does not restrict the module by role at route level.
+
+Create/Edit/Delete UI:
+- The page computes canManage using:
+  - MANAGEMENT_ROLES = ['SUPER_ADMIN', 'CEO', 'HR']
+  - MANAGER_ROLES = ['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER']
+- In practice, the page allows create/edit/delete based on a broader condition:
+  - user.role in MANAGEMENT_ROLES or MANAGER_ROLES
+- Therefore FINANCE_MANAGER is currently treated as a management role on the frontend and sees create/edit/delete controls.
+
+API usage:
+- The page expects methods like getAnnouncements(), createAnnouncement(), updateAnnouncement(), deleteAnnouncement(), markAnnouncementAsRead().
+- In the inspected frontend API service, these concrete announcement methods are not implemented in the same file as other API helpers; the page still invokes them as if they exist, which indicates a mismatch between page expectations and actual service implementation.
+
+Response format expectations:
+- FetchAnnouncements does: setAnnouncements(Array.isArray(data) ? data : []);
+- So the frontend expects a raw array response and not a wrapped envelope.
+
+Local filtering:
+- Filter states: all, pinned, unread, department.
+- Announcements are filtered locally on the page after fetching.
+- This is only UI filtering; it does not replace server-side authorization.
+
+Team/employee/role sending:
+- Frontend does not appear to send teamId, employeeId, or role as authorization inputs to the announcement API.
+- The UI does use user.role and department from auth state to decide UI behavior and audience defaults, but not as trusted server-side authorization input.
+
+Unauthorized direct API calls:
+- A user could still call announcement routes directly if authenticated, because there is no explicit role enforcement on the read list and mark-read endpoints in the controller.
+- The frontend route/module does not protect the feature by role, so unauthorised users can still access the page UI in the client.
+
+4. Current database model
+-------------------------
+Prisma schema: prisma/schema.prisma
+
+Announcement model:
+- id: Int @id @default(autoincrement())
+- title: String
+- content: String @db.Text
+- category: String @default("General")
+- priority: AnnouncementPriority @default(LOW)
+- targetAudience: AnnouncementAudience @default(ALL)
+- departmentId: String?
+- targetDepartment: String?
+- isPinned: Boolean @default(false)
+- expiresAt: DateTime?
+- createdById: Int
+- createdAt: DateTime @default(now())
+- updatedAt: DateTime @updatedAt
+- reads: AnnouncementRead[]
+- createdBy: User @relation(fields: [createdById], references: [id])
+
+AnnouncementRead model:
+- id: Int @id @default(autoincrement())
+- announcementId: Int
+- employeeId: Int
+- readAt: DateTime @default(now())
+- announcement: Announcement @relation(...)
+- employee: Employee @relation(...)
+- unique constraint on [announcementId, employeeId]
+
+Audience enums:
+- AnnouncementAudience: ALL, DEPARTMENT
+- AnnouncementPriority: LOW, MEDIUM, HIGH, URGENT
+
+User and Employee relationships:
+- User has announcements relation
+- Employee has announcementReads relation
+- Employee has teamId and Team.managerId relationship in Team model
+- Team model: id, name, managerId, members, manager
+
+Current schema capabilities:
+- It can model global vs department-level announcements.
+- It cannot model:
+  - sales-team-only announcements
+  - IT-team-only announcements
+  - finance-only announcements
+  - role-targeted announcements
+  - manager-owned team announcements
+  - employee-specific announcements
+  - publish status
+  - active/inactive lifecycle status
+  - author-only visibility policy
+
+5. Current authorization behavior
+---------------------------------
+
+Create logic in AnnouncementService:
+- Resolves employee by reqUser.employeeId
+- Gets departmentId from reqUser.departmentId or employee.department
+- Uses global roles set: ['SUPER_ADMIN', 'CEO', 'HR', 'HR_MANAGER']
+- If role is global => targetAudience = ALL, departmentId = null
+- Else => targetAudience = DEPARTMENT, departmentId = departmentId string
+- createdById = reqUser.id
+
+List logic in AnnouncementService:
+- Finds active announcements where expiresAt is null or gte current time
+- If departmentId is null => only ALL
+- Else => OR of ALL and DEPARTMENT with same departmentId
+- Includes reads for current employeeId
+
+Update logic:
+- AnnouncementService.updateAnnouncement(id, dto)
+- No ownership check
+- No authorization against current user role
+- No visibility check
+
+Delete logic:
+- AnnouncementService.deleteAnnouncement(id)
+- No ownership check
+- No authorization against current user role
+- No visibility check
+
+Mark as read:
+- Requires employeeId
+- Checks only that announcement exists
+- Does not check whether employee is authorized to read the announcement
+
+This means current announcement logic is role/baseline gated at controller entry for some operations, but not sufficiently protected in service logic.
+
+6. Current visibility/audience logic
+------------------------------------
+
+Current logic currently decides:
+- Who can create?
+  - Controller route allows MANAGEMENT_ROLES, but service itself does not enforce role. It simply uses reqUser.role to determine audience.
+- Who can edit?
+  - Any user who passes RolesGuard and calls PATCH /announcements/:id can update any record.
+- Who can delete?
+  - Any user who passes RolesGuard and calls DELETE /announcements/:id can delete any record.
+- Who can see all announcements?
+  - There is no dedicated all-visibility role check beyond list logic that includes ALL announcements when departmentId is null or when global role is effectively the only route to set ALL.
+- Who can see team announcements?
+  - No current team announcement concept exists.
+- How is announcement audience represented?
+  - Only as ALL or DEPARTMENT, not manager/team role/employee-specific.
+- Current feature capabilities actually present:
+  - global announcement = yes
+  - team announcement = no
+  - employee-specific announcement = no
+  - role-specific announcement = no
+  - author-only visibility = no
+  - publish status = no
+  - expiration = yes (expiresAt)
+  - active/inactive = no (not represented as status field)
+  - read/unread state = yes (AnnouncementRead relation + includes reads in query)
+
+7. Current role matrix
+----------------------
+
+Current state matrix (actual code behavior):
+
+Role | Create | Read | Update | Delete | Current visibility
+SUPER_ADMIN | Yes | Yes | Yes | Yes | ALL + depts visible by service logic
+CEO | Yes | Yes | Yes | Yes | ALL + depts visible by service logic
+HR | Yes | Yes | Yes | Yes | ALL + depts visible by service logic
+FINANCE_MANAGER | No (backend guard denies on create/update/delete, but frontend UI shows them) | Yes, list-based | No | No | Mostly ALL + same department logic only
+IT_MANAGER | Yes | Yes | Yes | Yes | ALL + same department logic
+SALES_MANAGER | Yes | Yes | Yes | Yes | ALL + same department logic
+EMPLOYEE | No | Yes | No | No | ALL + same department logic
+
+8. Target role matrix
+---------------------
+
+Approved target matrix:
+
+Role | Create | Read | Update | Delete | Required visibility
+SUPER_ADMIN | Yes | Yes | Yes | Yes | Every authenticated HRMS user
+CEO | Yes | Yes | Yes | Yes | Every authenticated HRMS user
+HR | Yes | Yes | Yes | Yes | Every authenticated HRMS user
+FINANCE_MANAGER | No | Yes (read-only) | No | No | Only org-wide announcements from SUPER_ADMIN/CEO/HR; not IT-only or Sales-only manager announcements unless explicitly approved
+IT_MANAGER | Yes | Yes | Yes, if authorized/owned | Yes, if authorized/owned | Only IT team + SUPER_ADMIN + CEO + HR; not Sales team or unrelated employees
+SALES_MANAGER | Yes | Yes | Yes, if authorized/owned | Yes, if authorized/owned | Only Sales team + SUPER_ADMIN + CEO + HR; not IT team or unrelated employees
+EMPLOYEE | No | Yes, if authorized | No | No | Only announcements explicitly authorized to them
+
+Manager visibility must distinguish:
+- Sales manager own team
+- IT manager own team
+- other teams
+- organization-wide announcements
+- direct access to unauthorized announcement IDs
+
+9. Exact gaps between current and target behavior
+--------------------------------------------------
+
+1. Current implementation uses department/global visibility; target requires org-wide + team-scoped + manager-scoped visibility.
+2. Current backend does not enforce authorization on update/delete by ownership or by manager/role rules.
+3. Current backend does not enforce visibility on direct announcement ID access.
+4. Current backend does not restrict manager access to their own team only.
+5. Current backend does not distinguish Sales/IT/Finance manager-only visibility.
+6. Current frontend allows the announcement module to all authenticated users and shows create/edit/delete to FINANCE_MANAGER, even though backend denies that access.
+7. Current Prisma model cannot express team-only, role-only, or manager-only announcement audiences without a schema change.
+8. Current service ignores DTO targetAudience and always derives audience from user role and department.
+9. There is no detail endpoint enforcing list/detail visibility.
+10. Current mark-as-read endpoint allows unauthorized read access to any announcement id if the user can authenticate.
+
+10. Security vulnerabilities
+---------------------------
+
+Finding | Severity | Classification
+IDOR on announcement mutation | HIGH | Risk: update/delete by any ID if role guard passes
+List endpoint leaking unauthorized announcements | HIGH | Current list logic is department/global only and not team/role-aware
+Detail endpoint leaking unauthorized announcements | MEDIUM | No detail route exists, but direct ID-based actions can still act without ownership checks
+Manager cross-team access | HIGH | No Team.managerId or team relationship logic used for announcement visibility
+Employee mutation access | HIGH | Employee cannot create from controller, but there is no ownership validation for manager announcements
+Finance Manager unintended access | HIGH | Frontend UI lets Finance Manager manage announcements incorrectly
+Client-supplied teamId bypass | PASS in current announcement code | No announcement-specific teamId is trusted from client request
+Client-supplied employeeId bypass | PASS in current announcement code | markAsRead uses req.user.employeeId from authenticated JWT, not client-provided employeeId
+Client-supplied role bypass | PASS in current announcement code | RolesGuard uses auth user.role, not request body
+Frontend-only authorization | HIGH | Frontend route and controls are not aligned with backend rules
+Missing backend role guards | MEDIUM | GET and POST :id/read endpoints have no explicit role decorator
+Author spoofing | MEDIUM | Created-by is taken from authenticated user, but mutation checks do not enforce ownership
+Ability to modify another user's announcement | HIGH | No ownership check
+Ability to delete another user's announcement | HIGH | No ownership check
+
+11. Schema change required: YES
+-------------------------------
+
+Yes. The database schema is insufficient to implement the approved business behavior.
+
+Minimum schema changes required:
+- Add an announcement audience or team-target field that can represent Sales team, IT team, or global audience.
+- Add explicit team assignment support if managers must target their team.
+- Preserve createdById as the author pointer, but enforce it in update/delete authorization.
+- Ensure the schema can support organization-wide + team-scoped + role-scoped visibility rules.
+
+Current schema cannot represent required behavior because:
+- AnnouncementAudience only supports ALL and DEPARTMENT.
+- There is no Team relation on Announcement.
+- There is no role-target or manager-target concept.
+- There is no explicit team-only audience field.
+- There is no visibility/ownership enforcement model beyond createdById.
+
+12. Exact files that would need modification
+--------------------------------------------
+
+Backend files:
+- src/modules/announcement/announcement.controller.ts
+- src/modules/announcement/announcement.service.ts
+- src/modules/announcement/dto/create-announcement.dto.ts
+- src/modules/announcement/dto/update-announcement.dto.ts
+- prisma/schema.prisma
+
+Related reference files (not direct announcement code but relevant to implementation pattern):
+- src/common/authorization/authorization.service.ts
+- src/common/guards/roles.guard.ts
+- src/auth/strategies/jwt.strategy.ts
+
+Frontend files:
+- src/pages/AnnouncementsPage.tsx
+- src/App.tsx
+- src/components/layout/Sidebar.tsx
+- src/services/api.ts
+- frontend auth/role check logic if present
+
+13. Exact tests that would need to be added/changed
+----------------------------------------------------
+
+Current tests:
+- src/modules/announcement/announcement.service.spec.ts
+
+Current tests cover only:
+- employee feed filtering of global and department announcements
+- creation of global announcements for global roles
+- creation of department announcements for department-scoped roles
+
+Missing tests required for eventual implementation:
+- SUPER_ADMIN: create, update, delete, global visibility
+- CEO: create, update, delete, global visibility
+- HR: create, update, delete, global visibility
+- SALES_MANAGER: create, own Sales-team audience, cannot target another team, Sales team can see, SUPER_ADMIN/CEO/HR can see, IT team cannot see, Finance Manager cannot see, unauthorized direct ID access denied
+- IT_MANAGER: create, own IT-team audience, cannot target another team, IT team can see, SUPER_ADMIN/CEO/HR can see, Sales team cannot see, Finance Manager cannot see, unauthorized direct ID access denied
+- EMPLOYEE: read authorized announcements, cannot create, cannot update, cannot delete, cannot access unauthorized announcement IDs
+- FINANCE_MANAGER: read org-wide announcements, cannot create, cannot update, cannot delete, cannot access manager-only announcements
+- unknown/legacy roles denied
+- client-supplied teamId cannot bypass manager scope
+- client-supplied employeeId cannot bypass scope
+- client-supplied role cannot change authorization
+
+14. Minimal implementation plan
+------------------------------
+
+1. Add a schema model that supports global + team-based + org-wide announcement visibility.
+2. Keep the existing approved seven-role model unchanged.
+3. Implement backend visibility filtering for list and detail endpoints based on persisted user identity, team ownership, and role.
+4. Enforce ownership rules on update/delete using the authenticated user and persisted author metadata.
+5. Restrict create/update/delete endpoints to the exact approved business permissions.
+6. Remove or align frontend visibility and controls with backend permissions.
+7. Add the required tests before final implementation.
+
+15. Explicit NO-CHANGE areas
+----------------------------
+
+This audit did not modify or propose changes to:
+- Attendance module
+- Leave module
+- Reports module
+- Assets module
+- Documents module
+- WFH module
+- Holidays module
+- Employees module
+- Teams module
+- Payroll module
+- Any other unrelated module
+- AuthorizationService implementation
+- Prisma schema changes during this audit
+- Any migration
+- Any refactor
+
+Final conclusion
+----------------
+
+The current Announcement module is a simple ALL vs DEPARTMENT feed with no team-aware, role-aware, or owner-aware authorization model. The target business requirement is substantially stricter and requires both schema and service/controller changes. The backend is the source of truth and must be corrected before any frontend behavior can be trusted.

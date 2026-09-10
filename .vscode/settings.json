@@ -1,3 +1,14 @@
 {
-    "prisma.pinToPrisma6": true
+    "prisma.pinToPrisma6": true,
+    "cSpell.words": [
+        "Kolkata",
+        "autoincrement",
+        "regularizations",
+        "helpdesk",
+        "Helpdesk",
+        "Regularizations",
+        "aadhar",
+        "ifsc",
+        "pincode"
+    ]
 }

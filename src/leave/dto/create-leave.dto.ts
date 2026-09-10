@@ -7,6 +7,9 @@ import {
   IsEnum,
   Min,
   IsBoolean,
+  IsNotEmpty,
+  MaxLength,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -27,6 +30,9 @@ export class CreateLeaveDto {
   durationType?: LeaveDurationType;
 
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
+  @MaxLength(500)
   reason!: string;
 
   @IsOptional()

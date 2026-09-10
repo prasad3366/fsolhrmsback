@@ -42,9 +42,16 @@ export class EmployeeExitScheduler {
 
       // Deactivate credentials for all matching employees
       for (const employee of employeesToDeactivate) {
-        await this.prisma.user.update({
-          where: { id: employee.userId },
-          data: { isActive: false },
+        await this.prisma.$transaction(async (tx) => {
+          await tx.user.update({
+            where: { id: employee.userId },
+            data: { isActive: false },
+          });
+
+          await tx.employee.update({
+            where: { id: employee.id },
+            data: { status: 'INACTIVE' },
+          });
         });
 
         this.logger.log(
