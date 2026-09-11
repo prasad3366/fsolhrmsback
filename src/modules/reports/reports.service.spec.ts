@@ -1,4 +1,5 @@
 import { ForbiddenException } from '@nestjs/common';
+import { AttendanceStatus } from '@prisma/client';
 import { ReportsService } from './reports.service';
 
 const adminRoles = ['SUPER_ADMIN', 'CEO', 'HR'];
@@ -110,5 +111,38 @@ describe('ReportsService authorization and scope', () => {
     expect(employeeFindMany).toHaveBeenLastCalledWith(expect.objectContaining({
       where: { teamId: { in: [7] }, status: 'ACTIVE' },
     }));
+  });
+});
+
+describe('ReportsService attendance export safety', () => {
+  it('does not count an open persisted PRESENT record as completed presence', async () => {
+    const attendanceFindMany = jest.fn().mockResolvedValue([
+      {
+        date: new Date(2026, 7, 3),
+        status: AttendanceStatus.PRESENT,
+        clockIn: new Date(2026, 7, 3, 9),
+        clockOut: null,
+        user: { employee: { id: 7, empCode: 'E7', firstName: 'Open', lastName: 'Record', department: 'Engineering' } },
+      },
+      {
+        date: new Date(2026, 7, 4),
+        status: AttendanceStatus.PRESENT,
+        clockIn: new Date(2026, 7, 4, 9),
+        clockOut: new Date(2026, 7, 4, 17),
+        user: { employee: { id: 7, empCode: 'E7', firstName: 'Open', lastName: 'Record', department: 'Engineering' } },
+      },
+    ]);
+    const service = new ReportsService(
+      {
+        employee: { findMany: jest.fn(), count: jest.fn() },
+        attendanceRecord: { findMany: attendanceFindMany },
+      } as any,
+      { canAccessOrganizationWide: jest.fn().mockReturnValue(true) } as any,
+      {} as any,
+    );
+
+    await expect(service.getAttendanceReportData(undefined, undefined, { id: 1, role: 'HR' })).resolves.toEqual([
+      expect.objectContaining({ employeeId: 7, totalPresentDays: 1, totalAbsentDays: 0, lateArrivals: 0 }),
+    ]);
   });
 });

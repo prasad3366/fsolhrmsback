@@ -122,6 +122,34 @@ export class PayrollService {
     return this.computePayroll(employeeId, month, year);
   }
 
+  private classifyCompletedAttendanceContribution(hours: number): number {
+    if (hours < 4) return 0;
+    if (hours < 7) return 0.5;
+    return 1;
+  }
+
+  private getAttendanceContribution(record: any): number {
+    if (!record) return 0;
+
+    const hasClockIn = record.clockIn != null;
+    const hasClockOut = record.clockOut != null;
+
+    if (!hasClockIn || !hasClockOut) {
+      return 0;
+    }
+
+    const totalHours = Number(
+      record.totalHours ??
+        ((record.clockOut.getTime() - record.clockIn.getTime()) / 3600000),
+    );
+
+    return this.classifyCompletedAttendanceContribution(Number.isFinite(totalHours) ? totalHours : 0);
+  }
+
+  private isApprovedLeave(leave: any): boolean {
+    return leave?.status === 'APPROVED';
+  }
+
   private async computePayroll(employeeId: number, month: number, year: number) {
     /* Date Range */
 
@@ -156,8 +184,7 @@ export class PayrollService {
     let presentDays = 0;
 
     for (const att of attendanceRecords) {
-      if (att.status === 'PRESENT' || att.status === 'LATE') presentDays += 1;
-      if (att.status === 'HALF_DAY') presentDays += 0.5;
+      presentDays += this.getAttendanceContribution(att);
     }
 
     /* 🔥 Approved Leaves */
@@ -174,6 +201,8 @@ export class PayrollService {
     let approvedLeaveDays = 0;
 
     for (const leave of leaves) {
+      if (!this.isApprovedLeave(leave)) continue;
+
       // Prorate leaves spanning a month boundary so only the days
       // that fall inside this payroll month are credited.
       const overlapStart = leave.startDate < startDate ? startDate : leave.startDate;

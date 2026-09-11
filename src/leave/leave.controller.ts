@@ -50,7 +50,7 @@ export class LeaveController {
   private async assertLeaveManagementAccess(req: any): Promise<void> {
     const role = String(req?.user?.role ?? '').toUpperCase();
 
-    if (this.authorizationService.canAccessOrganizationWide(req.user, 'leave')) {
+    if (['SUPER_ADMIN', 'HR'].includes(role)) {
       return;
     }
 
@@ -76,6 +76,11 @@ export class LeaveController {
     return this.service.applyLeave(employeeId, dto);
   }
 
+  @Get('types')
+  getTypes() {
+    return this.service.getLeaveTypes();
+  }
+
   @Patch('approve/:id')
   async approve(@Req() req, @Param('id') id: string) {
     await this.assertLeaveManagementAccess(req);
@@ -91,6 +96,12 @@ export class LeaveController {
     return this.assertLeaveManagementAccess(req).then(() =>
       this.service.rejectLeave(+id, dto.remarks, req.user.employeeId, req.user.role),
     );
+  }
+
+  @Patch('cancel/:id')
+  async cancel(@Req() req, @Param('id') id: string) {
+    const employeeId = this.getAuthenticatedEmployeeId(req);
+    return this.service.cancelLeave(+id, employeeId, req.user.role);
   }
 
   @Get('history')
@@ -169,6 +180,16 @@ export class LeaveController {
     }
 
     return this.service.selfBalance(employeeId, +yearStart);
+  }
+
+  @Get('self/monthly')
+  async selfMonthly(
+    @Req() req,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    const employeeId = this.getAuthenticatedEmployeeId(req);
+    return this.service.selfMonthlyLeave(employeeId, Number(month), Number(year));
   }
 
   @Post('carry-forward')

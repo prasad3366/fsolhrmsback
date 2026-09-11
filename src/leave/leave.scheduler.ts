@@ -70,11 +70,17 @@ export class LeaveScheduler {
 
     const yearStart = getFinancialYearStart(new Date());
 
+    const policies = await Promise.all(
+      leaveTypes.map((type) => this.prisma.leavePolicy.findUnique({
+        where: { leaveTypeName: type.name },
+        select: { annualAllocation: true },
+      })),
+    );
     const data = employees.flatMap((emp) =>
-      leaveTypes.map((type) => ({
+      leaveTypes.map((type, index) => ({
         employeeId: emp.id,
         leaveTypeId: type.id,
-        allocated: type.yearlyQuota,
+        allocated: policies[index]?.annualAllocation ?? type.yearlyQuota,
         yearStart,
       })),
     );

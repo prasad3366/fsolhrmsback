@@ -56,13 +56,20 @@ describe('HolidaysService business dates', () => {
   });
 
   it.each([
-    ['Pune', ['global', 'matching'], ['different']],
-    [null, ['global'], ['matching', 'different']],
+    [
+      'Pune',
+      ['global', 'empty', 'whitespace', 'matching', 'case-insensitive'],
+      ['different'],
+    ],
+    [null, ['global', 'empty', 'whitespace'], ['matching', 'case-insensitive', 'different']],
   ])('filters employee Holidays by canonical city: %s', async (city, visible, hidden) => {
     prisma.employee.findUnique.mockResolvedValue({ city });
     const holidays = [
       { name: 'global', location: null },
+      { name: 'empty', location: '' },
+      { name: 'whitespace', location: '   ' },
       { name: 'matching', location: city === 'Pune' ? ' pune ' : 'Pune' },
+      { name: 'case-insensitive', location: city === 'Pune' ? 'PUNE' : 'Pune' },
       { name: 'different', location: 'Mumbai' },
     ];
     prisma.holiday.findMany.mockResolvedValue(holidays);

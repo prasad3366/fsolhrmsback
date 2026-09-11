@@ -86,8 +86,20 @@ export class PayrollScheduler {
         let presentDays = 0;
 
         for (const att of attendanceRecords) {
-          if (att?.status === 'PRESENT' || att?.status === 'LATE') presentDays += 1;
-          if (att?.status === 'HALF_DAY') presentDays += 0.5;
+          const clockIn = att?.clockIn ?? null;
+          const clockOut = att?.clockOut ?? null;
+
+          if (!clockIn || !clockOut) {
+            continue;
+          }
+
+          const totalHours = Number(
+            att?.totalHours ?? ((new Date(clockOut).getTime() - new Date(clockIn).getTime()) / 3600000),
+          );
+
+          if (totalHours < 4) continue;
+          if (totalHours < 7) presentDays += 0.5;
+          else presentDays += 1;
         }
 
         /* Leaves */
@@ -104,6 +116,8 @@ export class PayrollScheduler {
         let approvedLeaveDays = 0;
 
         for (const leave of leaves) {
+          if (leave?.status !== 'APPROVED') continue;
+
           // Prorate leaves spanning a month boundary so only the days
           // that fall inside this payroll month are credited.
           const overlapStart = leave.startDate < startDate ? startDate : leave.startDate;

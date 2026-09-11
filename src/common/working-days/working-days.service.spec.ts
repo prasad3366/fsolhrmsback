@@ -56,4 +56,15 @@ describe('WorkingDaysService', () => {
     await expect(normalService.service.getWorkingDates(7, [normal])).resolves.toEqual([]);
     await expect(salesService.service.getWorkingDates(7, [salesSaturday])).resolves.toEqual([]);
   });
+
+  it('uses the Asia/Kolkata weekday at a UTC date boundary', async () => {
+    const { service } = createService(null);
+
+    await expect(
+      service.getWorkingDates(7, [
+        new Date('2026-09-05T18:30:00.000Z'),
+        new Date('2026-09-06T18:30:00.000Z'),
+      ]),
+    ).resolves.toEqual([new Date('2026-09-06T18:30:00.000Z')]);
+  });
 });

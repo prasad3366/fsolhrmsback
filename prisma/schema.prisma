@@ -419,6 +419,7 @@ model Leave {
   isEmergency        Boolean           @default(false)
   isLossOfPay        Boolean           @default(false)
   medicalCertificate String?
+  medicalCertificateFileName String?
   employee           Employee          @relation(fields: [employeeId], references: [id])
   leaveType          LeaveType         @relation(fields: [leaveTypeId], references: [id])
 
@@ -752,7 +753,9 @@ enum AttendanceStatus {
   LATE
   HALF_DAY
   ABSENT
+  LEAVE
   ON_LEAVE
+  IN_PROGRESS
 }
 
 enum RegularizationStatus {

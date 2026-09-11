@@ -73,6 +73,40 @@ export class LeaveService {
     );
   }
 
+  private async canManageTargetLeave(
+    tx: any,
+    leaveEmployeeId: number,
+    actorEmployeeId: number,
+    actorRole: string,
+  ): Promise<boolean> {
+    const role = String(actorRole ?? '').toUpperCase();
+    if (role === 'SUPER_ADMIN') return true;
+    if (leaveEmployeeId === actorEmployeeId) return false;
+
+    const target = await tx.employee.findUnique({
+      where: { id: leaveEmployeeId },
+      select: { id: true, user: { select: { role: true } }, team: { select: { name: true } } },
+    });
+    if (!target) return false;
+
+    const targetRole = String(target.user?.role ?? '').toUpperCase();
+    if (
+      ['HR', 'CEO', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER'].includes(targetRole)
+    ) {
+      return false;
+    }
+
+    if (role === 'HR') return true;
+
+    if (role !== 'IT_MANAGER' && role !== 'SALES_MANAGER') return false;
+    const expectedTeam = role === 'IT_MANAGER' ? 'IT' : 'SALES';
+    return String(target.team?.name ?? '').toUpperCase() === expectedTeam &&
+      await this.authorizationService.canAccessEmployee(
+        { id: actorEmployeeId, role, employeeId: actorEmployeeId },
+        leaveEmployeeId,
+      );
+  }
+
   // ================= APPLY LEAVE =================
   async applyLeave(employeeId: number, dto: CreateLeaveDto) {
     if (
@@ -128,7 +162,7 @@ export class LeaveService {
         const overlap = await tx.leave.findFirst({
           where: {
             employeeId,
-            status: { not: 'REJECTED' },
+            status: { in: ['PENDING', 'APPROVED'] },
             startDate: { lte: end },
             endDate: { gte: start },
           },
@@ -184,6 +218,7 @@ export class LeaveService {
             reason: dto.reason,
             yearStart,
             medicalCertificate: dto.medicalCertificate,
+            medicalCertificateFileName: dto.medicalCertificateFileName,
             isEmergency: dto.isEmergency ?? false,
             isLossOfPay,
           },
@@ -215,23 +250,10 @@ export class LeaveService {
           throw new BadRequestException('Leave already processed');
         }
 
-        const approver = await tx.employee.findUnique({
-          where: { id: approverEmployeeId },
-          include: { user: true },
-        });
-
+        const approver = await tx.employee.findUnique({ where: { id: approverEmployeeId } });
         if (!approver) throw new BadRequestException('Approver not found');
 
-        const normalizedRole = String(approverRole ?? '').toUpperCase();
-        const canApproveOrgWide = ['SUPER_ADMIN', 'CEO', 'HR'].includes(normalizedRole);
-        const canApproveAsManager =
-          ['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole) &&
-          (await this.authorizationService.canAccessEmployee(
-            { id: approverEmployeeId, role: normalizedRole, employeeId: approverEmployeeId },
-            leave.employeeId,
-          ));
-
-        if (!canApproveOrgWide && !canApproveAsManager) {
+        if (!(await this.canManageTargetLeave(tx, leave.employeeId, approverEmployeeId, approverRole))) {
           throw new BadRequestException('Unauthorized to approve leave');
         }
 
@@ -303,44 +325,97 @@ export class LeaveService {
       throw new BadRequestException('Rejection remarks are too long');
     }
 
-    const leave = await this.prisma.leave.findUnique({
-      where: { id },
-    });
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const leave = await tx.leave.findUnique({ where: { id } });
+        if (!leave) throw new NotFoundException('Leave not found');
+        if (leave.status !== 'PENDING') throw new BadRequestException('Leave already processed');
 
-    if (!leave) throw new NotFoundException('Leave not found');
+        const approver = await tx.employee.findUnique({ where: { id: approverEmployeeId } });
+        if (!approver) throw new BadRequestException('Approver not found');
+        if (!(await this.canManageTargetLeave(tx, leave.employeeId, approverEmployeeId, approverRole))) {
+          throw new BadRequestException('Unauthorized to reject leave');
+        }
 
-    const approver = await this.prisma.employee.findUnique({
-      where: { id: approverEmployeeId },
-      include: { user: true },
-    });
+        const transition = await tx.leave.updateMany({
+          where: { id, status: 'PENDING' },
+          data: { status: 'REJECTED', remarks },
+        });
+        if (transition.count !== 1) throw new BadRequestException('Leave already processed');
+        return tx.leave.findUnique({ where: { id }, include: { employee: true, leaveType: true } });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (this.isSerializationConflict(error)) {
+        throw new BadRequestException('Rejection conflicts with another request');
+      }
+      throw error;
+    }
+  }
 
-    if (!approver) throw new BadRequestException('Approver not found');
+  async cancelLeave(id: number, actorEmployeeId: number, actorRole: string) {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const leave = await tx.leave.findUnique({ where: { id } });
+        if (!leave) throw new NotFoundException('Leave not found');
+        if (!['PENDING', 'APPROVED'].includes(leave.status)) {
+          throw new BadRequestException('Leave cannot be cancelled');
+        }
 
-    const normalizedRole = String(approverRole ?? '').toUpperCase();
-    const canRejectOrgWide = ['SUPER_ADMIN', 'CEO', 'HR'].includes(normalizedRole);
-    const canRejectAsManager =
-      ['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole) &&
-      (await this.authorizationService.canAccessEmployee(
-        { id: approverEmployeeId, role: normalizedRole, employeeId: approverEmployeeId },
-        leave.employeeId,
-      ));
-    const canApprove = canRejectOrgWide || canRejectAsManager;
+        const role = String(actorRole ?? '').toUpperCase();
+        const isOwner = leave.employeeId === actorEmployeeId;
+        const canCancel = leave.status === 'PENDING'
+          ? isOwner
+          : await this.canManageTargetLeave(tx, leave.employeeId, actorEmployeeId, role);
+        if (!canCancel) throw new ForbiddenException('Unauthorized to cancel leave');
 
-    if (!canApprove)
-      throw new BadRequestException('Unauthorized to reject leave');
+        const transition = await tx.leave.updateMany({
+          where: { id, status: leave.status },
+          data: { status: 'CANCELLED' },
+        });
+        if (transition.count !== 1) throw new BadRequestException('Leave already processed');
 
-    await this.prisma.leave.update({
-      where: { id },
-      data: { status: 'REJECTED', remarks },
-    });
+        if (leave.status === 'APPROVED' && !leave.isLossOfPay) {
+          const balance = await tx.leaveBalance.updateMany({
+            where: {
+              employeeId: leave.employeeId,
+              leaveTypeId: leave.leaveTypeId,
+              yearStart: leave.yearStart,
+              used: { gte: leave.totalDays },
+            },
+            data: { used: { decrement: leave.totalDays } },
+          });
+          if (balance.count !== 1) throw new BadRequestException('Leave balance cannot be restored');
+        }
 
-    return this.prisma.leave.findUnique({
-      where: { id },
-      include: { employee: true, leaveType: true },
-    });
+        return tx.leave.findUnique({ where: { id }, include: { employee: true, leaveType: true } });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (this.isSerializationConflict(error)) {
+        throw new BadRequestException('Cancellation conflicts with another request');
+      }
+      throw error;
+    }
   }
 
   // ================= BALANCE =================
+  async getLeaveTypes() {
+    const leaveTypes = await this.prisma.leaveType.findMany({ orderBy: { name: 'asc' } });
+    const policies = await this.prisma.leavePolicy.findMany();
+    const policiesByName = new Map(policies.map((policy) => [policy.leaveTypeName, policy]));
+    return leaveTypes.map((type) => {
+      const policy = policiesByName.get(type.name);
+      return {
+        id: type.id,
+        name: type.name,
+        yearlyQuota: policy?.annualAllocation ?? type.yearlyQuota,
+        carryForward: type.carryForward,
+        maxCarryLimit: policy?.carryForwardMax ?? type.maxCarryLimit,
+        monthlyAccrual: type.monthlyAccrual,
+        requiresMedical: policy?.requiresDocument ?? type.requiresMedical,
+      };
+    });
+  }
+
   async getBalance(role: string, employeeId: number, yearStart: number) {
     const employees =
       role === 'EMPLOYEE'
@@ -358,6 +433,8 @@ export class LeaveService {
     return balances.map((b) => ({
       employeeId: b.employeeId,
       employeeName: `${b.employee.firstName} ${b.employee.lastName}`,
+      leaveTypeId: b.leaveTypeId,
+      id: b.leaveTypeId,
       leaveType: b.leaveType.name,
       allocated: b.allocated,
       used: b.used,
@@ -375,42 +452,41 @@ export class LeaveService {
     user?: AuthorizationUser,
   ) {
     const normalizedRole = String(role ?? '').toUpperCase();
-    const where = {
+    const where: any = {
       ...(normalizedRole === 'EMPLOYEE' && { employeeId }),
+      ...(normalizedRole === 'HR' && { employeeId: { not: employeeId } }),
     };
 
     if (
       user &&
       (normalizedRole === 'IT_MANAGER' || normalizedRole === 'SALES_MANAGER')
     ) {
-      const leaves = await this.prisma.leave.findMany({
-        where: {},
-        include: {
-          employee: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              empCode: true,
-              user: { select: { email: true } },
-            },
-          },
-          leaveType: true,
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      const visibleLeaves = await this.filterManagerLeaves(user, leaves);
-      const start = (page - 1) * limit;
-
-      return {
-        data: visibleLeaves.slice(start, start + limit),
-        pagination: {
-          page,
-          limit,
-          total: visibleLeaves.length,
-          totalPages: Math.ceil(visibleLeaves.length / limit),
-        },
+      const managedTeamWhere = {
+        employee: { team: { managerId: Number(user.employeeId) } },
+        employeeId: { not: Number(user.employeeId) },
       };
+      const [data, total] = await this.prisma.$transaction([
+        this.prisma.leave.findMany({
+          where: managedTeamWhere,
+          include: {
+            employee: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                empCode: true,
+                user: { select: { email: true } },
+              },
+            },
+            leaveType: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+      this.prisma.leave.count({ where: managedTeamWhere }),
+    ]);
+      return { data, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } };
     }
     const [data, total] = await this.prisma.$transaction([
       this.prisma.leave.findMany({
@@ -452,17 +528,19 @@ export class LeaveService {
       throw new BadRequestException('Access denied');
     }
 
-    const leaves = await this.prisma.leave.findMany({
-      where: { status: 'PENDING' },
+    const where: any = { status: 'PENDING' };
+    if (normalizedRole === 'HR') {
+      where.employeeId = { not: Number(user?.employeeId) };
+    }
+    if (['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole)) {
+      where.employee = { team: { managerId: Number(user?.employeeId) } };
+      where.employeeId = { not: Number(user?.employeeId) };
+    }
+    return this.prisma.leave.findMany({
+      where,
       include: { employee: true, leaveType: true },
       orderBy: { createdAt: 'asc' },
     });
-
-    if (!user || !['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole)) {
-      return leaves;
-    }
-
-    return this.filterManagerLeaves(user, leaves);
   }
 
   // ================= ALL LEAVE REQUESTS =================
@@ -472,16 +550,19 @@ export class LeaveService {
       throw new BadRequestException('Access denied');
     }
 
-    const leaves = await this.prisma.leave.findMany({
+    const where: any = {};
+    if (normalizedRole === 'HR') {
+      where.employeeId = { not: Number(user?.employeeId) };
+    }
+    if (['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole)) {
+      where.employee = { team: { managerId: Number(user?.employeeId) } };
+      where.employeeId = { not: Number(user?.employeeId) };
+    }
+    return this.prisma.leave.findMany({
+      where,
       include: { employee: true, leaveType: true },
       orderBy: { createdAt: 'desc' },
     });
-
-    if (!user || !['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole)) {
-      return leaves;
-    }
-
-    return this.filterManagerLeaves(user, leaves);
   }
 
   private async filterManagerLeaves<T extends { employeeId: number }>(
@@ -514,6 +595,23 @@ export class LeaveService {
         leaveType: true,
       },
       orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async selfMonthlyLeave(employeeId: number, month: number, year: number) {
+    if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year) || year < 1) {
+      throw new BadRequestException('Invalid month or year');
+    }
+    const monthStart = new Date(year, month - 1, 1);
+    const monthEnd = new Date(year, month, 0, 23, 59, 59, 999);
+    return this.prisma.leave.findMany({
+      where: {
+        employeeId,
+        startDate: { lte: monthEnd },
+        endDate: { gte: monthStart },
+      },
+      include: { employee: true, leaveType: true },
+      orderBy: { startDate: 'asc' },
     });
   }
 
@@ -557,6 +655,8 @@ export class LeaveService {
     });
 
     return balances.map((b) => ({
+      leaveTypeId: b.leaveTypeId,
+      id: b.leaveTypeId,
       leaveType: b.leaveType.name,
       allocated: b.allocated ?? 0,
       used: b.used ?? 0,

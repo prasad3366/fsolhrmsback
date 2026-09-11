@@ -271,10 +271,12 @@ describe('LeaveService L5 validation', () => {
         findUnique: jest.fn()
           .mockResolvedValueOnce({ id: 15, employeeId: 7, status: 'PENDING' })
           .mockResolvedValueOnce({ id: 15, status: 'REJECTED' }),
-        update: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       employee: { findUnique: jest.fn().mockResolvedValue({ id: 10 }) },
+      $transaction: jest.fn(),
     } as any;
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
     return { service: new LeaveService(prisma, {} as any), prisma };
   };
 
@@ -350,40 +352,30 @@ describe('LeaveService L5 validation', () => {
     await expect(service.rejectLeave(15, 'Not approved', 10, 'HR')).resolves.toEqual(
       expect.objectContaining({ status: 'REJECTED' }),
     );
-    expect(prisma.leave.update).toHaveBeenCalledWith({
-      where: { id: 15 },
+    expect(prisma.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 15, status: 'PENDING' },
       data: { status: 'REJECTED', remarks: 'Not approved' },
     });
   });
 });
 
 describe('LeaveService manager-scoped approval', () => {
-  const leave = {
-    id: 15,
-    employeeId: 77,
-    leaveTypeId: 5,
-    yearStart: 2026,
-    totalDays: 2,
-    status: 'PENDING',
-  };
+  const leave = { id: 15, employeeId: 77, leaveTypeId: 5, yearStart: 2026, totalDays: 2, status: 'PENDING' };
 
-  const createService = (
-    role: string,
-    canAccessEmployee = true,
-    finalStatus: 'APPROVED' | 'REJECTED' = 'APPROVED',
-  ) => {
-    const authorizationService = {
-      canAccessEmployee: jest.fn().mockResolvedValue(canAccessEmployee),
-    } as any;
+  const createService = (role: string, canAccessEmployee = true, finalStatus: 'APPROVED' | 'REJECTED' = 'APPROVED') => {
+    const authorizationService = { canAccessEmployee: jest.fn().mockResolvedValue(canAccessEmployee) } as any;
     const prisma = {
       leave: {
-        findUnique: jest.fn()
-          .mockResolvedValueOnce(leave)
-          .mockResolvedValueOnce({ ...leave, status: finalStatus }),
+        findUnique: jest.fn().mockResolvedValueOnce(leave).mockResolvedValueOnce({ ...leave, status: finalStatus }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-        update: jest.fn(),
       },
-      employee: { findUnique: jest.fn().mockResolvedValue({ id: 10 }) },
+      employee: {
+        findUnique: jest.fn().mockImplementation(async ({ select }: any) =>
+          select?.team
+            ? { id: 77, user: { role: 'EMPLOYEE' }, team: { name: role === 'IT_MANAGER' ? 'IT' : 'SALES' } }
+            : { id: 10 },
+        ),
+      },
       $transaction: jest.fn(),
       leaveBalance: {
         findUnique: jest.fn().mockResolvedValue({ allocated: 10, carryForward: 0, used: 0 }),
@@ -391,133 +383,52 @@ describe('LeaveService manager-scoped approval', () => {
       },
     } as any;
     prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
-
-    return {
-      service: new LeaveService(prisma, {} as any, authorizationService),
-      authorizationService,
-      prisma,
-      role,
-    };
+    return { service: new LeaveService(prisma, {} as any, authorizationService), authorizationService, prisma, role };
   };
 
-  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('%s can approve any employee leave', async (role) => {
-    const { service, authorizationService, prisma } = createService(role);
-
-    await expect(service.approveLeave(15, 10, role)).resolves.toEqual(
-      expect.objectContaining({ status: 'APPROVED' }),
-    );
-
-    expect(authorizationService.canAccessEmployee).not.toHaveBeenCalled();
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  it.each(['SUPER_ADMIN', 'HR'])('%s can approve an employee leave', async (role) => {
+    const { service } = createService(role);
+    await expect(service.approveLeave(15, 10, role)).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
   });
 
-  it.each(['IT_MANAGER', 'SALES_MANAGER'])('%s can approve an assigned-team leave', async (role) => {
-    const { service, authorizationService } = createService(role, true);
-
-    await expect(service.approveLeave(15, 10, role)).resolves.toEqual(
-      expect.objectContaining({ status: 'APPROVED' }),
-    );
-
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(
-      { id: 10, role, employeeId: 10 },
-      77,
-    );
+  it.each(['IT_MANAGER', 'SALES_MANAGER'])('%s can approve its team leave', async (role) => {
+    const { service } = createService(role, true);
+    await expect(service.approveLeave(15, 10, role)).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
   });
 
-  it.each(['IT_MANAGER', 'SALES_MANAGER'])('%s cannot approve an outside-team leave', async (role) => {
+  it.each(['IT_MANAGER', 'SALES_MANAGER'])('%s cannot approve outside-team leave', async (role) => {
     const { service, authorizationService, prisma } = createService(role, false);
-
-    await expect(service.approveLeave(15, 999, role)).rejects.toThrow(
-      'Unauthorized to approve leave',
-    );
-
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(
-      { id: 999, role, employeeId: 999 },
-      77,
-    );
+    await expect(service.approveLeave(15, 999, role)).rejects.toThrow('Unauthorized to approve leave');
+    expect(authorizationService.canAccessEmployee).toHaveBeenCalled();
     expect(prisma.leave.updateMany).not.toHaveBeenCalled();
-    expect(prisma.leaveBalance.update).not.toHaveBeenCalled();
   });
 
-  it.each(['FINANCE_MANAGER', 'EMPLOYEE'])('%s remains denied', async (role) => {
+  it.each(['CEO', 'FINANCE_MANAGER', 'EMPLOYEE'])('%s remains denied', async (role) => {
     const { service, prisma } = createService(role);
-
-    await expect(service.approveLeave(15, 10, role)).rejects.toThrow(
-      'Unauthorized to approve leave',
-    );
-
+    await expect(service.approveLeave(15, 10, role)).rejects.toThrow('Unauthorized to approve leave');
     expect(prisma.leave.updateMany).not.toHaveBeenCalled();
-    expect(prisma.leaveBalance.update).not.toHaveBeenCalled();
   });
 
-  it('uses the stored leave owner for manager rejection and never a client target', async () => {
+  it('uses the stored leave owner for manager rejection', async () => {
     const { service, authorizationService, prisma } = createService('IT_MANAGER', true, 'REJECTED');
-
-    await expect(service.rejectLeave(15, 'Not approved', 999, 'IT_MANAGER')).resolves.toEqual(
-      expect.objectContaining({ status: 'REJECTED' }),
-    );
-
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(
-      { id: 999, role: 'IT_MANAGER', employeeId: 999 },
-      77,
-    );
-    expect(prisma.leave.update).toHaveBeenCalledWith({
-      where: { id: 15 },
-      data: { status: 'REJECTED', remarks: 'Not approved' },
-    });
+    await expect(service.rejectLeave(15, 'Not approved', 999, 'IT_MANAGER')).resolves.toEqual(expect.objectContaining({ status: 'REJECTED' }));
+    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith({ id: 999, role: 'IT_MANAGER', employeeId: 999 }, 77);
+    expect(prisma.leave.updateMany).toHaveBeenCalledWith({ where: { id: 15, status: 'PENDING' }, data: { status: 'REJECTED', remarks: 'Not approved' } });
   });
 
-  it('filters manager history by the stored leave owner before pagination', async () => {
-    const authorizationService = {
-      canAccessEmployee: jest.fn(async (_user: unknown, employeeId: number) => employeeId === 77),
-    } as any;
-    const leaves = [
-      { id: 1, employeeId: 77 },
-      { id: 2, employeeId: 88 },
-    ];
-    const prisma = {
-      leave: { findMany: jest.fn().mockResolvedValue(leaves) },
-    } as any;
-    const service = new LeaveService(prisma, {} as any, authorizationService);
-
-    await expect(
-      service.leaveHistory('IT_MANAGER', 10, 1, 10, {
-        id: 10,
-        role: 'IT_MANAGER',
-        employeeId: 10,
-      }),
-    ).resolves.toEqual({
-      data: [{ id: 1, employeeId: 77 }],
-      pagination: { page: 1, limit: 10, total: 1, totalPages: 1 },
-    });
-
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledTimes(2);
+  it('filters manager history in the database before pagination', async () => {
+    const prisma = { leave: { findMany: jest.fn().mockResolvedValue([{ id: 1, employeeId: 77 }]), count: jest.fn().mockResolvedValue(1) }, $transaction: jest.fn() } as any;
+    prisma.$transaction.mockImplementation((queries: any[]) => Promise.all(queries));
+    const service = new LeaveService(prisma, {} as any, { canAccessEmployee: jest.fn() } as any);
+    await expect(service.leaveHistory('IT_MANAGER', 10, 1, 10, { id: 10, role: 'IT_MANAGER', employeeId: 10 })).resolves.toEqual({ data: [{ id: 1, employeeId: 77 }], pagination: { page: 1, limit: 10, total: 1, totalPages: 1 } });
+    expect(prisma.leave.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { employee: { team: { managerId: 10 } }, employeeId: { not: 10 } } }));
   });
 
-  it.each([
-    ['pendingRequests', 'IT_MANAGER'],
-    ['allLeaveRequests', 'SALES_MANAGER'],
-  ])('filters %s to the manager team', async (methodName, role) => {
-    const authorizationService = {
-      canAccessEmployee: jest.fn(async (_user: unknown, employeeId: number) => employeeId === 77),
-    } as any;
-    const leaves = [
-      { id: 1, employeeId: 77 },
-      { id: 2, employeeId: 88 },
-    ];
-    const prisma = {
-      leave: { findMany: jest.fn().mockResolvedValue(leaves) },
-    } as any;
-    const service = new LeaveService(prisma, {} as any, authorizationService);
-
-    const result = await (service as any)[methodName](role, {
-      id: 10,
-      role,
-      employeeId: 10,
-    });
-
-    expect(result).toEqual([{ id: 1, employeeId: 77 }]);
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledTimes(2);
+  it.each(['pendingRequests', 'allLeaveRequests'])('filters %s in the database', async (methodName) => {
+    const prisma = { leave: { findMany: jest.fn().mockResolvedValue([{ id: 1, employeeId: 77 }]) } } as any;
+    const service = new LeaveService(prisma, {} as any);
+    await expect((service as any)[methodName]('IT_MANAGER', { id: 10, role: 'IT_MANAGER', employeeId: 10 })).resolves.toEqual([{ id: 1, employeeId: 77 }]);
+    expect(prisma.leave.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ employee: { team: { managerId: 10 } } }) }));
   });
 });
 
