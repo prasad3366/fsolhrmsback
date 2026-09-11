@@ -1,0 +1,912 @@
+ATTENDANCE MODULE - COMPLETE DEEP END-TO-END AUDIT
+===================================================
+
+AUDIT TYPE
+----------
+Read-only audit only.
+
+No source code, tests, Prisma schema, migrations, configuration, or database
+data were modified during this audit.
+
+Repositories audited:
+
+Backend:
+C:\Users\GANESH\Desktop\hrms\backend\fsolback\hrms
+
+Frontend:
+C:\Users\GANESH\Desktop\hrms\frontened\finalhrmsfront
+
+1. EXECUTIVE SUMMARY
+--------------------
+The reported display was:
+
+  Date: 9/10/2026
+  Check In: --:--
+  Check Out: --:--
+  Total Hours: 0.00 hrs
+  Status: PRESENT
+
+The legacy Attendance database model permits this invalid combination because
+punchIn and punchOut are nullable, totalHours defaults to 0, and status defaults
+to PRESENT.
+
+The current employee Attendance page primarily reads the newer
+AttendanceRecord model. AttendanceRecord.clockIn is required, so the exact
+null/null/zero/PRESENT shape cannot be produced by a valid current
+AttendanceRecord row.
+
+Read-only inspection of the configured local database did not reproduce the
+reported shape for 2026-09-10. The local database contained:
+
+  Employee ID: 1
+  User ID: 1
+  Employee code: EMP-001
+  Status: ACTIVE
+  AttendanceRecord status: LATE
+  AttendanceRecord clockIn: populated
+  AttendanceRecord clockOut: NULL
+  AttendanceRecord totalHours: NULL
+  AttendanceLog: IN exists
+  Approved leave: spans 2026-09-10 through 2026-09-13
+  Legacy Attendance row: none for the inspected date
+  Holiday: none for the inspected date
+
+The strongest confirmed causes and risks are:
+
+  1. Two competing attendance models are active.
+  2. The legacy schema permits invalid PRESENT rows.
+  3. Current punch-in marks an open record PRESENT or LATE before checkout.
+  4. The self Attendance page passes the selected month incorrectly to its hook.
+  5. Legacy punch routes bypass parts of the newer validation flow.
+  6. Payroll, dashboard, and reports trust stored status without validating
+     punch timestamps.
+  7. Date-only values and JavaScript Date serialization can shift business dates.
+
+2. CURRENT ATTENDANCE ARCHITECTURE
+----------------------------------
+Primary backend files:
+
+  src/attendance/attendance.module.ts
+  src/attendance/attendance.controller.ts
+  src/attendance/attendance.service.ts
+  src/attendance/dto/punch.dto.ts
+  src/attendance/dto/attendance-record.dto.ts
+  src/attendance/dto/office-location.dto.ts
+  src/attendance/utils/geo.util.ts
+  src/common/working-days/working-days.service.ts
+  src/common/authorization/authorization.service.ts
+  src/holidays/holidays.service.ts
+  src/leave/leave.service.ts
+  src/dashboard/dashboard.service.ts
+  src/modules/reports/reports.service.ts
+  src/payroll/payroll.service.ts
+  src/payroll/payroll.scheduler.ts
+  src/scheduler/wfh.scheduler.ts
+
+Primary backend tests:
+
+  src/attendance/attendance.service.spec.ts
+  src/attendance/attendance.controller.spec.ts
+  src/attendance/attendance.leave.spec.ts
+  src/attendance/attendance.holiday-punch.spec.ts
+  src/employees/employees.controller.attendance.spec.ts
+  src/dashboard/dashboard.service.spec.ts
+  src/modules/reports/reports.monthly.spec.ts
+  src/payroll/payroll.working-days.spec.ts
+
+Primary frontend files:
+
+  src/modules/attendance/Attendance.tsx
+  src/modules/attendance/EmployeeAttendance.tsx
+  src/hooks/useAttendance.ts
+  src/components/attendance/PunchInOutModal.tsx
+  src/services/api.ts
+  src/services/attendanceService.ts
+  src/modules/employees/EmployeeProfile.tsx
+  dashboard attendance components
+  reports attendance components
+  src/services/api.test.ts
+
+3. DATABASE MODEL
+-----------------
+3.1 AttendanceRecord
+
+Defined in prisma/schema.prisma:
+
+  id              Int      @id @default(autoincrement())
+  userId          Int
+  userEmail       String
+  date            DateTime @db.Date
+  clockIn         DateTime
+  clockOut        DateTime?
+  totalHours      Float?
+  status          AttendanceStatus @default(PRESENT)
+  isLate          Boolean  @default(false)
+  isEarlyCheckout Boolean  @default(false)
+  ipAddress       String?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User relation
+  regularizations AttendanceRegularization[]
+
+  @@unique([userId, date])
+
+Important facts:
+
+  - clockIn is required.
+  - clockOut is nullable.
+  - totalHours is nullable.
+  - status defaults to PRESENT.
+  - identity is based on User.id.
+  - Employee is reached through User.employee.
+
+3.2 Legacy Attendance
+
+  id             Int              @id @default(autoincrement())
+  employeeId     Int
+  date           DateTime
+  punchIn       DateTime?
+  punchOut      DateTime?
+  punchInLat     Float?
+  punchInLng     Float?
+  punchOutLat    Float?
+  punchOutLng    Float?
+  totalHours     Float            @default(0)
+  overtime       Float            @default(0)
+  status         AttendanceStatus @default(PRESENT)
+  isAutoClosed   Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  locationStatus LocationStatus?
+  employee       Employee relation
+
+  @@unique([employeeId, date])
+
+The database permits:
+
+  punchIn = NULL
+  punchOut = NULL
+  totalHours = 0
+  status = PRESENT
+
+No database check constraint prevents this combination.
+
+3.3 AttendanceLog
+
+  id         Int       @id @default(autoincrement())
+  employeeId Int
+  type       PunchType
+  time       DateTime  @default(now())
+  employee   Employee relation
+
+PunchType values:
+
+  IN
+  OUT
+
+There is no uniqueness constraint preventing duplicate IN or OUT logs.
+
+3.4 Relevant enums
+
+AttendanceStatus:
+
+  PRESENT
+  LATE
+  HALF_DAY
+  ABSENT
+  LEAVE
+  ON_LEAVE
+
+LocationStatus:
+
+  OFFICE
+  OUTSIDE
+  WFH
+
+4. COMPLETE PRESENT STATUS INVESTIGATION
+----------------------------------------
+4.1 Normal punch-in
+
+File: src/attendance/attendance.service.ts
+Method: clockInWithClient()
+
+The method creates AttendanceRecord with:
+
+  status: isLate ? LATE : PRESENT
+
+Requirements:
+
+  - user ID is required.
+  - clockIn is always populated.
+  - clockOut is not required.
+  - zero-hour PRESENT is not created by this current path.
+  - a newly opened record is immediately PRESENT or LATE.
+
+4.2 Normal punch-out
+
+Method: clockOutWithClient()
+
+Status calculation:
+
+  less than 4 hours: ABSENT
+  4 hours to less than 7 hours: HALF_DAY
+  7 hours or more: PRESENT
+
+The status is calculated from server-side elapsed time.
+
+4.3 Approved regularization
+
+Method: processRegularization()
+
+An approved regularization updates AttendanceRecord with HALF_DAY, LATE, or
+PRESENT. Its lower threshold uses AttendancePolicy.halfDayHours, while normal
+checkout uses hardcoded 4/7 hour thresholds. Equivalent hours can therefore be
+classified differently in the two paths.
+
+4.4 Prisma defaults
+
+Both Attendance and AttendanceRecord default status to PRESENT. Omitting status
+from a direct create can therefore produce PRESENT without validated punches.
+
+4.5 Legacy punch-out fallback
+
+The legacy fallback can create an Attendance row when no row exists:
+
+  punchIn: punchOut
+  punchOut: punchOut
+  totalHours: 0
+
+Status is omitted and Prisma applies PRESENT. This creates a zero-hour PRESENT
+row, although punchIn is populated in this exact path.
+
+4.6 Seed/import
+
+prisma/add-august-attendance.ts creates valid AttendanceRecord rows with
+clock-in, clock-out, and totalHours of 9. It does not explain the reported
+null/null/zero/PRESENT display.
+
+5. RUNTIME DATABASE INSPECTION
+------------------------------
+A read-only query was executed against the configured local PostgreSQL database
+for 2026-09-10.
+
+The local data contained:
+
+Employee:
+
+  ID: 1
+  User ID: 1
+  Code: EMP-001
+  Name: Ganesh Tadala
+  Status: ACTIVE
+
+AttendanceRecord:
+
+  Status: LATE
+  clockIn: 2026-09-10T13:45:18.043Z
+  clockOut: NULL
+  totalHours: NULL
+
+AttendanceLog:
+
+  IN exists
+  OUT does not exist
+
+Leave:
+
+  Employee ID: 1
+  Status: APPROVED
+  Start: 2026-09-10
+  End: 2026-09-13
+
+Holiday:
+
+  No holiday found for the inspected date.
+
+Legacy Attendance:
+
+  No row found for the inspected date.
+
+Conclusion:
+
+The configured local database does not reproduce the exact null/null/zero/PRESENT
+row. The screenshot may have originated from another database, an older
+runtime, historical data, a manual insertion, legacy endpoint behavior, or a
+frontend/API date mismatch.
+
+6. PUNCH-IN FLOW
+----------------
+Newer frontend flow:
+
+  Attendance.tsx
+    -> useAttendance.punchIn()
+    -> ApiService.punchIn()
+    -> POST /api/attendance/punch-in
+    -> AttendanceController.punchIn()
+    -> requireSelfEmployeeId()
+    -> AttendanceService.punchIn()
+    -> requireActiveEmployee()
+    -> getLocationStatus()
+    -> Prisma transaction
+    -> AttendanceRecord + AttendanceLog
+
+Newer punch-in behavior:
+
+  - employee ID is derived from request.user.employeeId.
+  - the client cannot select another employee.
+  - active employee status is checked.
+  - duplicate punch-in is checked.
+  - date is normalized to the server business date.
+  - WFH and office location are evaluated.
+  - AttendanceRecord and AttendanceLog are written in a transaction.
+
+Legacy flow:
+
+  POST /api/attendance/clock-in
+    -> request.user.id
+    -> AttendanceService.clockIn()
+    -> AttendanceRecord
+
+The legacy route bypasses the newer employee ID resolution, active employee
+check, geolocation handling, and explicit AttendanceLog creation.
+
+7. PUNCH-OUT FLOW
+-----------------
+Newer frontend flow:
+
+  Attendance.tsx
+    -> PunchInOutModal
+    -> useAttendance.punchOut()
+    -> ApiService.punchOut()
+    -> POST /api/attendance/punch-out
+    -> requireSelfEmployeeId()
+    -> AttendanceService.punchOut()
+    -> Prisma transaction
+    -> AttendanceRecord update + OUT log
+
+Implemented behavior:
+
+  - server timestamp is authoritative.
+  - totalHours is calculated from stored clockIn and server checkout time.
+  - repeated checkout is rejected when clockOut already exists.
+  - status follows the 4/7 hour thresholds.
+
+Legacy route:
+
+  POST /api/attendance/clock-out
+
+This route accepts an optional client-supplied date and can modify a historical
+business date. It does not use the same stronger flow as punch-out.
+
+8. STATUS MATRIX
+----------------
+State                         Current behavior
+----------------------------  ---------------------------------------------
+No punch on working date      Virtual ABSENT in history/summary
+IN only                       Persisted PRESENT or LATE
+IN + OUT under 4 hours        ABSENT
+IN + OUT 4 to under 7 hours   HALF_DAY
+IN + OUT 7+ hours             PRESENT
+Approved leave                Virtual LEAVE in history; skipped in summary
+Pending leave                 ABSENT when no attendance exists
+Rejected leave                ABSENT when no attendance exists
+Cancelled leave               ABSENT when no attendance exists
+Sunday                        Excluded from working dates
+Normal Saturday               Excluded from working dates
+Sales Saturday               Included in working dates
+Holiday                      Excluded from working dates
+Future current-month date     Excluded after today
+Future month                 Summary returns zero counts
+Inactive employee            New active punch rejected
+
+The main business-rule mismatch is that an open IN-only record is already
+PRESENT/LATE even though checkout has not occurred.
+
+9. VIRTUAL ATTENDANCE LOGIC
+---------------------------
+getAttendanceHistory() generates virtual rows dynamically.
+
+Behavior:
+
+  - persisted AttendanceRecord rows are loaded first;
+  - eligible dates come from WorkingDaysService;
+  - missing eligible dates become virtual ABSENT rows;
+  - approved leave dates become virtual LEAVE rows;
+  - existing attendance rows are not replaced by virtual ABSENT;
+  - virtual logic never generates PRESENT;
+  - future dates are excluded from current-month history;
+  - future months return no history rows.
+
+10. WORKING-DAY LOGIC
+---------------------
+WorkingDaysService.getWorkingDates():
+
+  - Sunday is excluded.
+  - Normal Saturday is excluded.
+  - Sales Saturday is included.
+  - Monday-Friday are included.
+  - Holidays are excluded.
+
+The service is used by attendance, dashboard, reports, payroll, and WFH
+location checks.
+
+Holiday location is not considered by HolidaysService.isHoliday(). A populated
+location-specific holiday can therefore exclude all employees from working-day
+calculations.
+
+11. LEAVE INTEGRATION
+---------------------
+Approved leave:
+
+  - becomes virtual LEAVE in attendance history;
+  - contributes to summary leaveDays;
+  - is excluded from summary attendance classification;
+  - does not consistently update the persisted AttendanceRecord.
+
+Pending, rejected, and cancelled leave are not selected by the approved-leave
+queries and therefore become ABSENT when the date is an eligible working day.
+
+Actual attendance on an approved leave date is overridden at read time by the
+leave projection.
+
+12. HOLIDAY INTEGRATION
+-----------------------
+  - holidays are excluded from working-day denominators;
+  - punches are still accepted on holidays;
+  - holiday location is ignored by isHoliday();
+  - holiday logic does not directly create PRESENT;
+  - holiday logic can prevent virtual ABSENT generation.
+
+13. WFH INTEGRATION
+-------------------
+Approved WFH affects locationStatus only.
+
+  - WFH does not directly change PRESENT, ABSENT, or HALF_DAY.
+  - approved WFH is checked by date overlap.
+  - office distance determines OFFICE or OUTSIDE when WFH does not apply.
+  - WFH does not create attendance rows.
+
+14. MONTH/YEAR LOGIC
+--------------------
+EmployeeAttendance.tsx correctly maintains selectedMonth as YYYY-MM and sends:
+
+  - numeric month/year to Details;
+  - YYYY-MM to Summary.
+
+The self Attendance page has a confirmed frontend defect:
+
+  Attendance.tsx calls useAttendance(selectedMonth)
+
+but useAttendance() expects an options object containing month and year.
+
+As a result, the selected month is ignored by the hook and the hook falls back
+to the current month/year.
+
+Historical backend AttendanceRecord queries generally use a
+[monthStart, nextMonthStart) range. Current month calculations are capped at
+the current day. Reports, dashboard, and payroll implement their own date
+ranges, creating boundary inconsistency risk.
+
+15. SUMMARY VS DETAILS
+----------------------
+Details:
+
+  EmployeeAttendance.tsx
+    -> getEmployeeAttendance()
+    -> GET /attendance/employee/:id/monthly
+    -> getMyAttendanceForEmployee()
+    -> getAttendanceHistory()
+    -> AttendanceRecord plus virtual rows
+
+Summary:
+
+  EmployeeAttendance.tsx
+    -> getEmployeeAttendanceSummary()
+    -> GET /attendance/employee/:id/summary
+    -> getEmployeeMonthlySummary()
+    -> AttendanceRecord + Leave + WorkingDaysService
+
+Both use the selected Employee.id and resolve attendance through the employee's
+User.id. They use the same selected month in EmployeeAttendance.
+
+They differ because Details projects virtual rows while Summary calculates
+counts independently. Leave precedence and date handling are duplicated.
+
+The current system can produce Details/Summary disagreement when:
+
+  - approved leave overlaps an attendance record;
+  - LATE is not represented consistently in frontend types;
+  - date serialization crosses a timezone boundary;
+  - stale or different deployment data is used;
+  - the self Attendance month-selection bug is involved.
+
+16. EMPLOYEE ATTENDANCE AUTHORIZATION
+-------------------------------------
+getAttendanceEmployees():
+
+  SUPER_ADMIN / CEO / HR: active organization-wide employees
+  IT_MANAGER: teams managed by the manager
+  SALES_MANAGER: teams managed by the manager
+  EMPLOYEE: self only
+  unknown roles: denied
+
+Monthly and summary endpoints use AuthorizationService.canAccessEmployee().
+
+  SUPER_ADMIN / CEO / HR: organization-wide
+  EMPLOYEE: self only
+  IT_MANAGER / SALES_MANAGER: managed teams
+  FINANCE_MANAGER: explicitly denied by summary service
+  unknown roles: denied
+
+The Employee 360 controller includes FINANCE_MANAGER in its role list, but the
+service rejects Finance Manager access. Regularization routes use MANAGER in
+one role list, which does not match the stated seven-role model.
+
+17. EMPLOYEE 360
+----------------
+Route:
+
+  GET /api/employees/:id/360/attendance?month=YYYY-MM
+
+Flow:
+
+  EmployeeProfile.tsx
+    -> ApiService.getEmployee360Attendance()
+    -> EmployeesController.getEmployee360Attendance()
+    -> getTargetEmployeeAttendanceSummary()
+    -> getEmployeeMonthlySummary()
+
+Employee 360 uses the same summary engine as Employee Attendance. It has no
+matching details table and has the Finance Manager controller/service mismatch
+noted above.
+
+18. DASHBOARD, REPORTS, AND PAYROLL
+-----------------------------------
+Dashboard:
+
+  - reads AttendanceRecord;
+  - counts PRESENT and LATE as one day;
+  - counts HALF_DAY as 0.5;
+  - uses WorkingDaysService;
+  - calculates approved leave separately.
+
+Reports:
+
+  - read AttendanceRecord;
+  - count PRESENT and LATE as present;
+  - count HALF_DAY and ABSENT independently;
+  - use separate monthly range and leave calculations.
+
+Payroll:
+
+  - reads AttendanceRecord;
+  - counts PRESENT and LATE as present;
+  - counts HALF_DAY as 0.5;
+  - adds approved leave to payable days;
+  - trusts stored status without validating punches.
+
+A malformed PRESENT row can therefore affect payroll, reports, dashboard values,
+and exports.
+
+19. API INVENTORY
+-----------------
+  POST  /api/attendance/clock-in
+  POST  /api/attendance/clock-out
+  GET   /api/attendance/today
+  POST  /api/attendance/punch-in
+  POST  /api/attendance/punch-out
+  GET   /api/attendance/all
+  GET   /api/attendance/employees
+  GET   /api/attendance/employee/:id/summary
+  GET   /api/attendance/employee/:id/monthly
+  GET   /api/attendance/employee/:id
+  POST  /api/attendance/location
+  GET   /api/attendance/my-history
+  POST  /api/attendance/regularize
+  GET   /api/attendance/regularizations
+  PATCH /api/attendance/regularizations/:id
+  GET   /api/attendance/today-status
+  GET   /api/employees/:id/360/attendance
+
+All attendance controller routes inherit JWT authentication, but role and
+service authorization differ by route.
+
+20. API CONTRACT FINDINGS
+-------------------------
+Backend uses clockIn/clockOut for AttendanceRecord. Frontend AttendanceRecord
+types use punchIn/punchOut and normalize both forms.
+
+Additional drift:
+
+  - backend supports LATE but frontend AttendanceRecord status omits it;
+  - backend supports ON_LEAVE but frontend omits it;
+  - virtual rows can have null clock fields while frontend types require a
+    non-null punchIn string;
+  - frontend normalizes partial records with permissive casts;
+  - today status types omit LATE and LEAVE.
+
+21. FRONTEND STATE AND UI
+-------------------------
+useAttendance():
+
+  - loads history;
+  - loads today status;
+  - refreshes after punch actions;
+  - tracks loading, errors, pagination, and stale request IDs.
+
+Attendance.tsx:
+
+  - defaults to current month;
+  - supports month navigation and month input;
+  - displays daily rows;
+  - groups records by local calendar date;
+  - chooses Check In, Check Out, or View from today status.
+
+PunchInOutModal.tsx:
+
+  - requests browser geolocation;
+  - calls punch callbacks;
+  - optimistically switches local state;
+  - refreshes through onSuccess;
+  - can temporarily display a new state before refreshed server state is
+    confirmed.
+
+22. MANUAL AND ADMIN ATTENDANCE
+-------------------------------
+No dedicated admin manual attendance create endpoint was found.
+
+Correction is handled through:
+
+  POST /attendance/regularize
+  PATCH /attendance/regularizations/:id
+
+The database remains a direct insertion path for invalid legacy Attendance
+rows. Regularization approval is transactional but has no visible state-change
+guard against concurrent duplicate approval.
+
+23. CONCURRENCY AND TRANSACTIONS
+--------------------------------
+Implemented:
+
+  - Prisma transactions for current punch flows;
+  - unique user/date and employee/date keys;
+  - transaction for regularization approval.
+
+Risks:
+
+  - duplicate checks occur before writes;
+  - checkout has no explicit row lock or idempotency key;
+  - concurrent checkout can create duplicate OUT logs;
+  - unique constraint failures are not consistently translated;
+  - concurrent regularization decisions can race;
+  - no database checks validate timestamps or status combinations.
+
+24. DATE AND TIMEZONE
+---------------------
+Backend sets:
+
+  process.env.TZ = 'Asia/Kolkata'
+
+AttendanceRecord.date is PostgreSQL DATE, while timestamps are DateTime values.
+Frontend uses browser-local Date and toLocaleDateString().
+
+The local query returned a date-only value serialized as an ISO timestamp and a
+punch timestamp from the adjacent UTC representation. This demonstrates that
+business-date serialization needs an explicit contract.
+
+Risks exist around:
+
+  - midnight;
+  - month start;
+  - month end;
+  - browser timezone differences;
+  - current-day cutoffs;
+  - PostgreSQL DATE to JavaScript Date conversion.
+
+25. CONFIRMED DEFECTS
+---------------------
+ATT-001 - P1 - Legacy schema permits null/null/zero/PRESENT.
+ATT-002 - P1 - Attendance and AttendanceRecord compete as data sources.
+ATT-003 - P1 - Legacy clock-in bypasses newer employee/location flow.
+ATT-004 - P1 - Legacy clock-out accepts arbitrary client date.
+ATT-005 - P1 - Open punch is immediately PRESENT/LATE.
+ATT-006 - P2 - Approved leave is a read-time projection rather than one
+           unified persisted state.
+ATT-007 - P1 - Self Attendance selected month is ignored by the hook call.
+ATT-008 - P1 - Payroll and reports trust status without validating punches.
+ATT-009 - P2 - Frontend/backend response contracts drift.
+ATT-010 - P2 - Punch modal optimistically overrides server state.
+ATT-011 - P1 - Checkout concurrency is not explicitly protected.
+ATT-012 - P1 - Date and timezone handling can shift business dates.
+
+26. SECURITY FINDINGS
+---------------------
+  - Newer self punch routes derive employee identity from JWT.
+  - Employee monthly access is checked server-side.
+  - Manager team scoping is enforced by AuthorizationService.
+  - Unknown roles are denied in the main scoped path.
+  - Legacy routes have weaker validation and should be converged.
+  - Regularization role configuration is inconsistent with the stated roles.
+  - Employee 360 exposes Finance Manager at controller level but rejects it in
+    the service.
+  - No newer self-punch endpoint trusts a client employee ID.
+
+27. DATA INTEGRITY FINDINGS
+---------------------------
+  - Invalid status/punch combinations are schema-permitted.
+  - No check constraints validate status against punch fields.
+  - AttendanceLog does not enforce one IN before one OUT.
+  - Legacy and current writes create different data shapes.
+  - Payroll and reports trust status fields.
+  - Approved leave can override displayed attendance without changing raw data.
+  - Open AttendanceRecord rows can be counted as present.
+  - Concurrent operations are not fully controlled.
+
+28. BUSINESS-RULE INCONSISTENCIES
+---------------------------------
+  - Checkout uses hardcoded four/seven-hour thresholds.
+  - Regularization uses AttendancePolicy.halfDayHours.
+  - Open attendance is counted as present.
+  - Holiday punches are accepted but excluded from denominators.
+  - Location-specific holiday semantics are ignored by isHoliday().
+  - Leave precedence exists only in read-time projections.
+  - Classification logic is duplicated across modules.
+  - Frontend does not model every backend status.
+
+29. UX FINDINGS
+---------------
+  - Self Attendance month selection does not affect API requests.
+  - Punch modal uses optimistic local state.
+  - LATE has no dedicated frontend treatment.
+  - Virtual rows conflict with required frontend punch types.
+  - Date-only ISO values can display on an adjacent day.
+  - Different screens normalize response fields differently.
+
+30. TEST COVERAGE
+-----------------
+Existing tests cover:
+
+  - punch transactions;
+  - duplicate punch errors;
+  - inactive employees;
+  - status thresholds;
+  - virtual absences;
+  - approved leave projection;
+  - weekend and holiday working days;
+  - pagination;
+  - summary authorization;
+  - dashboard authorization;
+  - report DTO validation;
+  - Employee 360 route delegation.
+
+Missing or insufficient tests:
+
+  - exact null/null/zero/PRESENT database row;
+  - PostgreSQL status/punch constraints;
+  - real database integration;
+  - concurrent punch-in and punch-out;
+  - historical-date clock-out;
+  - coordinate range validation;
+  - cross-module agreement;
+  - timezone matrix;
+  - PunchInOutModal transitions;
+  - frontend month-selection request;
+  - LATE, LEAVE, and null-punch contracts;
+  - actual punch plus approved leave conflict;
+  - legacy/current route parity;
+  - payroll/report handling of malformed rows;
+  - end-to-end frontend to database punch flow.
+
+31. ARCHITECTURAL STRENGTHS
+---------------------------
+  - JWT authentication is present.
+  - Server-side employee authorization exists.
+  - Working-day logic is shared by multiple modules.
+  - Current punch writes use transactions.
+  - Daily unique keys exist.
+  - Leave, holiday, WFH, Employee 360, and manager scopes are integrated.
+  - Focused unit tests exist.
+
+32. ARCHITECTURAL RISKS
+-----------------------
+  - No canonical attendance model.
+  - No explicit open-punch lifecycle.
+  - No database invariants.
+  - Duplicated status classification.
+  - Duplicated date boundary logic.
+  - Weak concurrency semantics.
+  - Legacy and current routes coexist.
+  - Frontend contracts are permissive and inconsistent.
+  - Cross-module reconciliation is missing.
+  - Direct database insertion can create invalid operational data.
+
+33. REDESIGN READINESS
+----------------------
+ATTENDANCE MODULE MATURITY: 50%
+
+The module has a functional foundation but is not yet production-grade for
+payroll-critical correctness without first resolving data ownership, status
+lifecycle, date handling, concurrency, and database invariants.
+
+34. PRIORITIZED GAP LIST
+------------------------
+P0:
+  None confirmed from available local runtime evidence.
+
+P1:
+  1. Choose one canonical attendance model.
+  2. Prevent invalid PRESENT rows at schema and service boundaries.
+  3. Define the open-punch lifecycle.
+  4. Make punch operations concurrency-safe and idempotent.
+  5. Centralize status classification.
+  6. Centralize business-date and timezone handling.
+  7. Fix self Attendance month-selection contract.
+  8. Prevent malformed rows from affecting payroll and reports.
+  9. Restrict arbitrary historical clock-out.
+ 10. Converge legacy and newer punch routes.
+
+P2:
+  1. Centralize leave/holiday effective-day classification.
+  2. Align Employee 360 and direct attendance role behavior.
+  3. Correct frontend status types and API contracts.
+  4. Add runtime response validation.
+  5. Add cross-module consistency tests.
+  6. Add PostgreSQL integration tests.
+  7. Add timezone and month-boundary tests.
+  8. Define holiday/weekend punch policy.
+  9. Guard regularization state transitions.
+ 10. Add audit logging for corrections.
+
+P3:
+  1. Improve open-punch and status labels.
+  2. Improve empty-state and error presentation.
+  3. Improve export consistency.
+  4. Remove duplicate frontend normalization.
+  5. Improve loading and refresh feedback.
+
+35. TOP 10 PROBLEMS TO FIX FIRST
+--------------------------------
+  1. Competing Attendance and AttendanceRecord models.
+  2. Nullable punches plus default PRESENT.
+  3. Open punch stored as PRESENT.
+  4. Missing database invariants.
+  5. Different checkout and regularization thresholds.
+  6. Unsafe concurrent checkout.
+  7. Historical-date clock-out.
+  8. Holiday/weekend punch policy is undefined.
+  9. Reports and payroll trust status blindly.
+ 10. Frontend/backend clock/punch/LATE/null contract drift.
+
+36. SAFE FUTURE IMPLEMENTATION ORDER
+------------------------------------
+  1. Freeze current data and produce a read-only data-quality report.
+  2. Select the canonical attendance source.
+  3. Reconcile Attendance and AttendanceRecord data.
+  4. Define explicit states for no punch, open punch, completed punch, leave,
+     and absence.
+  5. Define approved-leave versus actual-punch precedence.
+  6. Centralize business-date and timezone handling.
+  7. Centralize working-day and effective attendance classification.
+  8. Add service and database validation.
+  9. Backfill or quarantine invalid rows.
+ 10. Make punch commands idempotent and concurrency-safe.
+ 11. Remove or secure legacy endpoints.
+ 12. Make payroll, dashboard, reports, and Employee 360 consume one classifier.
+ 13. Regenerate accurate frontend contracts.
+ 14. Add database, concurrency, timezone, API, and frontend tests.
+ 15. Verify against a production-like database.
+ 16. Redesign the UI after data and API contracts stabilize.
+
+FINAL CONCLUSION
+----------------
+The current local database does not confirm a null/null/zero/PRESENT row for
+2026-09-10. It contains an open LATE AttendanceRecord with an IN log and
+approved leave on the same date.
+
+The reported invalid shape remains possible through the legacy Attendance model
+and Prisma defaults. The principal architectural cause is the coexistence of
+two attendance models and multiple punch paths with different validation and
+persistence behavior.
+
+No files or database records were modified during this audit.

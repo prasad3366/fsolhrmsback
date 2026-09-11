@@ -40,6 +40,10 @@ export class CreateLeaveDto {
   medicalCertificate?: string;
 
   @IsOptional()
+  @IsString()
+  medicalCertificateFileName?: string;
+
+  @IsOptional()
   @IsBoolean()
   isEmergency?: boolean;
 }

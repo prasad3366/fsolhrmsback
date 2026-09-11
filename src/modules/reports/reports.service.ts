@@ -197,6 +197,7 @@ export class ReportsService {
         date: true,
         status: true,
         clockIn: true,
+        clockOut: true,
         user: {
           select: {
             employee: {
@@ -237,12 +238,14 @@ export class ReportsService {
         lateArrivals: 0,
       };
 
-      if (record.status === AttendanceStatus.PRESENT || record.status === 'LATE') {
+      const completedHours = this.getCompletedHours(record);
+      const contribution = this.getAttendanceContribution(record, completedHours);
+      if (contribution === 1) {
         row.totalPresentDays += 1;
-      } else if (record.status === AttendanceStatus.ABSENT) {
+      } else if (record.status === AttendanceStatus.ABSENT && record.clockIn && record.clockOut) {
         row.totalAbsentDays += 1;
       }
-      if (record.clockIn && (record.status === 'LATE' || this.isLateArrival(record.clockIn))) {
+      if (record.clockIn && record.clockOut && (record.status === 'LATE' || this.isLateArrival(record.clockIn))) {
         row.lateArrivals += 1;
       }
       rows.set(employee.id, row);
@@ -348,7 +351,7 @@ export class ReportsService {
               userId: { in: userIds },
               date: { gte: monthStart, lt: calculationEnd },
             },
-            select: { userId: true, date: true, status: true, clockIn: true },
+            select: { userId: true, date: true, status: true, clockIn: true, clockOut: true, totalHours: true },
           })
         : Promise.resolve([]),
       employeeIds.length
@@ -365,6 +368,7 @@ export class ReportsService {
               endDate: true,
               durationType: true,
               totalDays: true,
+              status: true,
             },
           })
         : Promise.resolve([]),
@@ -411,6 +415,7 @@ export class ReportsService {
       let approvedLeaveDays = 0;
 
       for (const leave of employeeLeaves) {
+        if (leave?.status && leave.status !== 'APPROVED') continue;
         const overlapStart = leave.startDate > monthStart ? leave.startDate : monthStart;
         const overlapEnd = leave.endDate < new Date(calculationEnd.getTime() - 1) ? leave.endDate : new Date(calculationEnd.getTime() - 1);
         if (overlapStart > overlapEnd) continue;
@@ -436,17 +441,21 @@ export class ReportsService {
 
       for (const key of workingDateKeys) {
         if (leaveDateKeys.has(key)) {
-          statuses.add(AttendanceStatus.ON_LEAVE);
+          statuses.add(AttendanceStatus.LEAVE);
           continue;
         }
         const record = recordsByDate.get(key);
-        if (record?.status === AttendanceStatus.PRESENT || record?.status === AttendanceStatus.LATE) {
+        const completedHours = this.getCompletedHours(record);
+        const contribution = this.getAttendanceContribution(record, completedHours);
+
+        if (contribution === 1) {
           presentDays += 1;
-          statuses.add(record.status);
-          if (record.status === AttendanceStatus.LATE || (record.clockIn && this.isLateArrival(record.clockIn))) lateArrivals += 1;
-        } else if (record?.status === AttendanceStatus.HALF_DAY) {
+          statuses.add(AttendanceStatus.PRESENT);
+          if (record?.status === AttendanceStatus.LATE || (record?.clockIn && this.isLateArrival(record.clockIn))) lateArrivals += 1;
+        } else if (contribution === 0.5) {
           halfDays += 1;
           statuses.add(AttendanceStatus.HALF_DAY);
+          if (record?.status === AttendanceStatus.LATE || (record?.clockIn && this.isLateArrival(record.clockIn))) lateArrivals += 1;
         } else {
           absentDays += 1;
           statuses.add(AttendanceStatus.ABSENT);
@@ -539,6 +548,24 @@ export class ReportsService {
       else date.setHours(0, 0, 0, 0);
     }
     return date;
+  }
+
+  private getCompletedHours(record: { clockIn?: Date | null; clockOut?: Date | null; totalHours?: number | null } | undefined) {
+    if (!record || !record.clockIn || !record.clockOut) return 0;
+    if (record.totalHours != null && Number.isFinite(Number(record.totalHours))) {
+      return Number(record.totalHours);
+    }
+    return (new Date(record.clockOut).getTime() - new Date(record.clockIn).getTime()) / 3600000;
+  }
+
+  private getAttendanceContribution(
+    record: { clockIn?: Date | null; clockOut?: Date | null; totalHours?: number | null; status?: AttendanceStatus | string } | undefined,
+    completedHours: number,
+  ) {
+    if (!record || !record.clockIn || !record.clockOut) return 0;
+    if (completedHours < 4) return 0;
+    if (completedHours < 7) return 0.5;
+    return 1;
   }
 
   private isLateArrival(punchIn: Date) {

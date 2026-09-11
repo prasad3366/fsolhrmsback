@@ -48,7 +48,7 @@ export class AttendanceController {
 
   @Get('today')
   async getToday(@Req() req: any) {
-    return this.service.getTodayStatusForEmployee(this.requireSelfEmployeeId(req));
+    return this.service.getTodayAttendance(this.requireSelfEmployeeId(req));
   }
 
   private requireSelfEmployeeId(req: any): number {
@@ -125,7 +125,7 @@ export class AttendanceController {
 
   @Get('employees')
   @UseGuards(RolesGuard)
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'SALES_MANAGER', 'IT_MANAGER', 'EMPLOYEE')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'SALES_MANAGER', 'IT_MANAGER', 'EMPLOYEE')
   getAttendanceEmployees(@Req() req, @Query('search') search?: string) {
     return this.service.getAttendanceEmployees(req, search);
   }
@@ -136,7 +136,7 @@ export class AttendanceController {
   // ============================
   @Get('employee/:id/summary')
   @UseGuards(RolesGuard)
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE')
   async getEmployeeSummary(@Req() req, @Param('id') id: string, @Query('month') month: string) {
     const employeeId = Number(id);
     await this.ensureEmployeeAttendanceAccess(req, employeeId);
@@ -145,7 +145,7 @@ export class AttendanceController {
 
   @Get('employee/:id/monthly')
   @UseGuards(RolesGuard)
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE')
   async getEmployeeMonthlyAttendance(
     @Req() req,
     @Param('id') id: string,

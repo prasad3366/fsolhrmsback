@@ -8,6 +8,7 @@ describe('AttendanceController history queries', () => {
     getAttendanceHistory: jest.fn(),
     getMyAttendanceForEmployee: jest.fn(),
     getTodayStatusForEmployee: jest.fn(),
+    getTodayAttendance: jest.fn(),
     punchIn: jest.fn(),
     punchOut: jest.fn(),
   } as unknown as jest.Mocked<AttendanceService>;
@@ -137,16 +138,16 @@ describe('AttendanceController history queries', () => {
 
   it.each(['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE'])
     ('allows %s to access self today status and punch actions without team authorization', async (role) => {
-      service.getTodayStatusForEmployee.mockResolvedValue({ clockedIn: false } as any);
+      service.getTodayAttendance.mockResolvedValue({ state: 'NOT_CHECKED_IN' } as any);
       service.punchIn.mockResolvedValue({ id: 1 } as any);
       service.punchOut.mockResolvedValue({ id: 1 } as any);
       const req = { user: { id: 70, role, employeeId: 7 }, ip: '127.0.0.1' };
 
-      await expect(controller.getToday(req)).resolves.toEqual({ clockedIn: false });
+      await expect(controller.getToday(req)).resolves.toEqual({ state: 'NOT_CHECKED_IN' });
       await expect(controller.punchIn(req, { latitude: 1, longitude: 2 })).resolves.toEqual({ id: 1 });
       await expect(controller.punchOut(req, { latitude: 1, longitude: 2 })).resolves.toEqual({ id: 1 });
 
-      expect(service.getTodayStatusForEmployee).toHaveBeenCalledWith(7);
+      expect(service.getTodayAttendance).toHaveBeenCalledWith(7);
       expect(service.punchIn).toHaveBeenCalledWith(7, 1, 2);
       expect(service.punchOut).toHaveBeenCalledWith(7, 1, 2);
       expect(authorizationService.canAccessEmployee).not.toHaveBeenCalled();

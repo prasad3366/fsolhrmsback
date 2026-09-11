@@ -128,16 +128,39 @@ export class DashboardService {
       if (!employeeId || !workingDatesByEmployee.get(employeeId)?.has(dateKey(att.date))) {
         continue;
       }
-      const current = presentDaysByEmployee.get(employeeId) || 0;
-      if (att.status === 'PRESENT' || att.status === 'LATE') {
-        presentDaysByEmployee.set(employeeId, current + 1);
-      } else if (att.status === 'HALF_DAY') {
-        presentDaysByEmployee.set(employeeId, current + 0.5);
+
+      const hasClockIn = !!att.clockIn;
+      const hasClockOut = !!att.clockOut;
+      if (hasClockIn && !hasClockOut) {
+        continue;
       }
+
+      if (!hasClockIn || !hasClockOut) {
+        continue;
+      }
+
+      const clockIn = att.clockIn;
+      const clockOut = att.clockOut;
+      if (!clockIn || !clockOut) {
+        continue;
+      }
+
+      const durationHours = (new Date(clockOut).getTime() - new Date(clockIn).getTime()) / 3600000;
+      const current = presentDaysByEmployee.get(employeeId) || 0;
+      if (durationHours < 4) {
+        // ABSENT: no contribution to presentDays
+        continue;
+      }
+      if (durationHours < 7) {
+        presentDaysByEmployee.set(employeeId, current + 0.5);
+        continue;
+      }
+      presentDaysByEmployee.set(employeeId, current + 1);
     }
 
     const leaveDaysByEmployee = new Map<number, number>();
     for (const leave of leaves) {
+      if (leave.status !== 'APPROVED') continue;
       const overlapStart = leave.startDate < startDate ? startDate : leave.startDate;
       const overlapEnd = leave.endDate > endDate ? endDate : leave.endDate;
       const datesBetween = (rangeStart: Date, rangeEnd: Date) => {

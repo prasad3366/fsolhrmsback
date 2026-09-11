@@ -83,6 +83,74 @@ describe('ReportsService monthly attendance report', () => {
     expect(teamFindMany).toHaveBeenCalledWith({ where: { managerId: 10 }, select: { id: true } });
   });
 
+  it('ignores stale open present/late records and applies approved leave precedence in the monthly report', async () => {
+    employeeFindMany.mockResolvedValue([employee(1, 10)]);
+    employeeCount.mockResolvedValue(1);
+    workingDates.mockResolvedValue([
+      new Date(2026, 7, 3),
+      new Date(2026, 7, 4),
+      new Date(2026, 7, 5),
+    ]);
+    attendanceFindMany.mockResolvedValue([
+      { userId: 10, date: new Date(2026, 7, 3), status: AttendanceStatus.PRESENT, clockIn: new Date(2026, 7, 3, 9), clockOut: null },
+      { userId: 10, date: new Date(2026, 7, 4), status: AttendanceStatus.LATE, clockIn: new Date(2026, 7, 4, 9), clockOut: new Date(2026, 7, 4, 16) },
+      { userId: 10, date: new Date(2026, 7, 5), status: AttendanceStatus.PRESENT, clockIn: new Date(2026, 7, 5, 9), clockOut: new Date(2026, 7, 5, 13) },
+    ]);
+    leaveFindMany.mockResolvedValue([
+      {
+        employeeId: 1,
+        status: 'APPROVED',
+        startDate: new Date(2026, 7, 3),
+        endDate: new Date(2026, 7, 3),
+        durationType: 'FULL_DAY',
+        totalDays: 1,
+      },
+    ]);
+    const service = new ReportsService(prisma, authorizationService as any, { getWorkingDates: workingDates } as any);
+
+    const result = await service.getMonthlyAttendanceReport({ id: 1, role: 'HR' }, { month: '2026-08' } as any);
+
+    expect(result.data[0]).toMatchObject({
+      workingDays: 3,
+      presentDays: 1,
+      halfDays: 1,
+      absentDays: 0,
+      approvedLeaveDays: 1,
+      presentEquivalentDays: 1.5,
+    });
+    expect(result.summary).toMatchObject({
+      totalPresentDays: 1,
+      totalHalfDays: 1,
+      totalAbsentDays: 0,
+      totalApprovedLeaveDays: 1,
+      totalPresentEquivalentDays: 1.5,
+    });
+  });
+
+  it.each(['PENDING', 'REJECTED', 'CANCELLED'])('treats %s leave as non-leave in monthly attendance', async (status) => {
+    employeeFindMany.mockResolvedValue([employee(1, 10)]);
+    employeeCount.mockResolvedValue(1);
+    workingDates.mockResolvedValue([new Date(2026, 7, 3)]);
+    leaveFindMany.mockResolvedValue([
+      {
+        employeeId: 1,
+        status,
+        startDate: new Date(2026, 7, 3),
+        endDate: new Date(2026, 7, 3),
+        durationType: 'FULL_DAY',
+        totalDays: 1,
+      },
+    ]);
+    const service = new ReportsService(prisma, authorizationService as any, { getWorkingDates: workingDates } as any);
+
+    const result = await service.getMonthlyAttendanceReport({ id: 1, role: 'HR' }, { month: '2026-08' } as any);
+
+    expect(result.data[0]).toMatchObject({
+      approvedLeaveDays: 0,
+      absentDays: 1,
+    });
+  });
+
   it('calculates half days, virtual absences, leave, and summary across the full scope', async () => {
     const rows = [employee(1, 10), employee(2, 20)];
     employeeCount.mockResolvedValue(2);
@@ -95,12 +163,13 @@ describe('ReportsService monthly attendance report', () => {
       new Date(2026, 7, 5),
     ]);
     attendanceFindMany.mockResolvedValue([
-      { userId: 10, date: new Date(2026, 7, 3), status: AttendanceStatus.PRESENT, clockIn: new Date(2026, 7, 3, 9) },
-      { userId: 10, date: new Date(2026, 7, 4), status: AttendanceStatus.HALF_DAY, clockIn: new Date(2026, 7, 4, 9) },
+      { userId: 10, date: new Date(2026, 7, 3), status: AttendanceStatus.PRESENT, clockIn: new Date(2026, 7, 3, 9), clockOut: new Date(2026, 7, 3, 17) },
+      { userId: 10, date: new Date(2026, 7, 4), status: AttendanceStatus.LATE, clockIn: new Date(2026, 7, 4, 9), clockOut: new Date(2026, 7, 4, 14) },
     ]);
     leaveFindMany.mockResolvedValue([
       {
         employeeId: 2,
+        status: 'APPROVED',
         startDate: new Date(2026, 7, 4),
         endDate: new Date(2026, 7, 4),
         durationType: 'FULL_DAY',
@@ -136,7 +205,7 @@ describe('ReportsService monthly attendance report', () => {
     employeeCount.mockResolvedValue(2);
     workingDates.mockResolvedValue([new Date(2026, 7, 3)]);
     attendanceFindMany.mockResolvedValue([
-      { userId: 10, date: new Date(2026, 7, 3), status: AttendanceStatus.PRESENT, clockIn: new Date() },
+      { userId: 10, date: new Date(2026, 7, 3), status: AttendanceStatus.PRESENT, clockIn: new Date(2026, 7, 3, 9), clockOut: new Date(2026, 7, 3, 17) },
     ]);
     const service = new ReportsService(prisma, authorizationService as any, { getWorkingDates: workingDates } as any);
 

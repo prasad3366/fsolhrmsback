@@ -1,0 +1,390 @@
+PAYROLL MODULE AUDIT REPORT
+FooDeeZ / HRMS
+Audit only: no code, schema, migration, API, UI, or business-logic changes made.
+
+A. CURRENT PAYROLL ARCHITECTURE
+
+Backend Payroll is implemented across:
+- src/payroll/payroll.controller.ts
+- src/payroll/payroll.service.ts
+- src/payroll/payroll.calculator.ts
+- src/payroll/payroll.scheduler.ts
+- src/payroll/payslip.service.ts
+- src/salary/salary.controller.ts
+- src/salary/salary.service.ts
+
+Dependencies include PrismaService, EmployeesService, AuthorizationService, WorkingDaysService, attendance, approved leave, holidays, employees, teams, and salary models.
+
+Frontend Payroll is implemented across:
+- src/modules/payroll/Payroll.tsx
+- src/hooks/usePayroll.ts
+- src/components/payroll/RunPayrollModal.tsx
+- src/components/payroll/AssignSalaryModal.tsx
+- src/components/payroll/AddPayrollAdjustmentModal.tsx
+- src/services/api.ts
+- src/App.tsx
+- src/components/layout/Sidebar.tsx
+
+B. CURRENT END-TO-END PAYROLL FLOW
+
+1. The frontend opens Payroll.
+2. It calls GET /payroll/my for the logged-in employee's payroll history.
+3. It calls GET /employees/me for salary details.
+4. Org-wide users can open Run Payroll and Assign Salary.
+5. Run Payroll sends POST /payroll/run.
+6. The backend resolves employeeId or empCode and validates month/year.
+7. It selects the latest EmployeeSalary effective before the payroll month end.
+8. It calculates working days through WorkingDaysService.
+9. It loads attendance records.
+10. It loads overlapping approved leave records.
+11. It calculates present days, payable days, LOP days, earnings, deductions, and net salary.
+12. It creates Payroll with default status DRAFT.
+13. Payroll history is displayed in the frontend.
+14. Payslip download calls GET /payroll/payslip/:id.
+15. Adjustments call POST /payroll/others.
+
+The scheduler separately generates payroll for active employees on the 29th of each month.
+
+C. EXISTING BUSINESS RULES AND CALCULATIONS
+
+Salary selection:
+- EmployeeSalary must match the employee.
+- effectiveFrom must be on or before the payroll month end.
+- The latest effective salary is selected.
+- Salary assignment stores monthlyCTC as annualCTC / 12.
+- Salary assignment currently rejects a second salary row for the employee, despite frontend raise-mode text.
+
+Earnings:
+- basic = monthlyCTC * basicPercent / 100
+- hra = basic * hraPercent / 100
+- conveyance = monthlyCTC * conveyancePercent / 100
+- specialAllowance = monthlyCTC - basic - hra - conveyance
+- gross = basic + hra + conveyance + specialAllowance
+
+Deductions:
+- pf = basic * pfPercent / 100
+- pt = structure.ptAmount || 0
+- perDaySalary = gross / workingDays
+- leaveDeduction = lopDays * perDaySalary
+- deductions = pf + pt + leaveDeduction
+- netSalary = gross - deductions
+
+All calculator values are rounded with Math.round().
+
+Attendance:
+- PRESENT contributes 1 day.
+- LATE contributes 1 day.
+- HALF_DAY contributes 0.5 day.
+- Other statuses contribute 0.
+
+Leave:
+- Only APPROVED leaves are included.
+- Overlapping leaves are prorated across month boundaries.
+- approvedLeaveDays += leave.totalDays * overlapDays / leaveSpanDays.
+- payableDays = presentDays + approvedLeaveDays.
+- lopDays = max(workingDays - payableDays, 0).
+- Leave days are not filtered against weekends, holidays, or attendance.
+
+Adjustments:
+- ALLOWANCE increases grossSalary and netSalary.
+- DEDUCTION increases deductions and decreases netSalary.
+- Adjustments are created and Payroll totals are updated in separate operations.
+- Payroll.otherAllowance exists but is not updated by addOther().
+
+Working days:
+- Sunday is always excluded.
+- Saturday is excluded for normal teams.
+- Saturday is included when the employee team name is SALES.
+- Holidays are excluded through HolidaysService.isHoliday().
+- isHoliday checks date only; employee location is not applied.
+
+Period inconsistency:
+- Manual payroll uses the first through last calendar day of the month.
+- Scheduler payroll uses the 29th of the previous month through the 28th of the current month.
+
+D. ROLE AND AUTHORIZATION MATRIX
+
+Role              View own  View others  Generate  Assign salary  Adjust  Payslip others
+SUPER_ADMIN       Yes       Yes          Yes       Yes             Yes     Yes
+CEO               Yes       Yes          Yes       Yes             Yes     Yes
+HR                Yes       Yes          Yes       Yes             Yes     Yes
+FINANCE_MANAGER   Yes       Yes          Yes       Yes             Yes     Yes
+IT_MANAGER        Backend team scope; frontend route blocked       Team-scoped
+SALES_MANAGER     Backend team scope; frontend route blocked       Team-scoped
+EMPLOYEE          Own only  No           No        No              No      Own only
+
+Backend org-wide access is granted to SUPER_ADMIN, CEO, HR, and FINANCE_MANAGER.
+IT_MANAGER and SALES_MANAGER access is based on teams managed by the authenticated employee.
+EMPLOYEE access is restricted to the authenticated employee ID.
+
+The backend uses authenticated JWT role and employeeId for authorization. Client-supplied employeeId is accepted for org-wide operations, which are controller-role restricted.
+
+E. FRONTEND FINDINGS
+
+Working:
+- Payroll route exists.
+- Self-service payroll uses /payroll/my.
+- Salary details use /employees/me.
+- Payslip download exists.
+- Run Payroll, Assign Salary, and Add Adjustment modals exist.
+- Loading, error, and empty states exist.
+
+Issues:
+- Sidebar shows Payroll to every authenticated user, including roles blocked by the route.
+- Route allows SUPER_ADMIN, CEO, HR, FINANCE_MANAGER, and EMPLOYEE, but not IT_MANAGER or SALES_MANAGER.
+- Adjustment controls appear to employees even though backend rejects employee adjustment requests.
+- Adjustment controls remain visible for FINALIZED and PAID payrolls until submission is rejected.
+- Frontend locally calculates salary values using a default structure that may differ from backend structure values.
+- Frontend displays conveyance, but Payroll does not persist a conveyance column.
+- Frontend uses substantial any typing.
+- Run Payroll filters employees with no payroll history, while backend only checks whether the requested employee/month/year already exists.
+- Frontend describes scheduler behavior but does not model payroll lifecycle.
+- /payroll/my and /payroll API helpers convert many errors into empty arrays.
+
+F. BACKEND FINDINGS
+
+Implemented:
+- Manual generation.
+- Scheduled generation.
+- Salary assignment.
+- Salary structure lookup.
+- Attendance integration.
+- Approved leave integration.
+- Working-day and holiday calculation.
+- Payroll history lookup.
+- Payslip PDF generation.
+- Payroll adjustments.
+- Basic rejection of adjustments for FINALIZED and PAID payrolls.
+
+Missing or incomplete:
+- No approval endpoint.
+- No finalization endpoint.
+- No payment endpoint.
+- No approval/finalization/payment metadata.
+- No payroll batch lifecycle.
+- No explicit payroll period model.
+- No Payroll update controller route.
+- No transaction spanning adjustment creation and totals update.
+- No concurrency lock around payroll generation.
+- No complete immutable lifecycle enforcement.
+- No payroll audit trail.
+- No dedicated adjustment DTO.
+- No dedicated salary assignment DTO.
+- No unique-race handling around payroll creation.
+
+Payslip findings:
+- Generated through Puppeteer from an HTML string.
+- Company name is hardcoded as PALATE NETWORKS PRIVATE LIMITED.
+- Payroll period is not shown.
+- Adjustments, conveyance, and otherAllowance are not shown.
+- Browser/PDF errors are not translated into controlled HTTP errors.
+
+G. DATABASE AND SCHEMA FINDINGS
+
+Payroll-related models:
+- SalaryStructure
+- EmployeeSalary
+- Payroll
+- PayrollAdjustment
+- Employee
+- User
+
+Current constraints:
+- Payroll has foreign keys to Employee and EmployeeSalary.
+- EmployeeSalary references Employee and SalaryStructure.
+- PayrollAdjustment references Payroll.
+- Payroll has a unique employeeId/month/year constraint.
+- EmployeeSalary has an employeeId index.
+
+Limitations:
+- Payroll has no updatedAt.
+- No approval, finalization, or payment fields.
+- PayrollStatus only has DRAFT, FINALIZED, and PAID.
+- No status transition history.
+- No payroll period or batch model.
+- No payment reference/date.
+- No persisted conveyance field.
+- healthInsurance and pfBase are present in SalaryStructure but unused by calculation.
+- otherAllowance is present but not maintained by adjustment logic.
+- No adjustment audit metadata.
+- No protection against overlapping salary effective periods.
+- No constraint against duplicate salary effective dates.
+
+Payroll was introduced in migration 20260305084833_payroll and subsequently evolved through Payroll and SalaryStructure migrations, including removal of legacy fields and schema drift resolution.
+
+H. CROSS-MODULE CONSISTENCY FINDINGS
+
+Employees:
+- Payroll uses Employee IDs and EmployeeSalary relations.
+- Manual attendance lookup joins through user.employee.id.
+- Scheduler attendance lookup uses employee.userId.
+
+Attendance:
+- Payroll counts statuses but does not validate duplicate attendance, employment dates, holiday attendance, leave conflicts, or exit dates.
+
+Leave:
+- Approved leave is included but may count weekends and holidays.
+- Leave is not reconciled against attendance.
+- Payable days are not capped independently beyond LOP max calculation.
+
+Holidays:
+- WorkingDaysService uses HolidaysService.isHoliday().
+- isHoliday checks date only and ignores employee location.
+
+Teams:
+- Saturday eligibility is determined by team name SALES.
+
+AuthorizationService:
+- Reused for employee salary, payslip, employee 360, and manager scope checks.
+- Core Payroll generation/list operations rely mainly on controller role decorators.
+
+I. TEST COVERAGE AND FINDINGS
+
+Existing tests cover:
+- Payroll adjustments.
+- Finalized adjustment rejection.
+- Input validation.
+- Working-day delegation.
+- Sales Saturday behavior.
+- Sunday exclusion.
+- Holiday exclusion.
+- Calculator formulas.
+- Employee 360 payroll access.
+- Salary assignment and duplicate assignment behavior.
+- Salary controller access.
+
+Focused existing Payroll and Salary tests currently pass:
+- 28 tests passed.
+- 0 failures.
+
+Missing coverage:
+- Full computePayroll persistence flow.
+- Attendance and leave combinations.
+- Month-boundary leave calculations.
+- Holiday/location interaction.
+- Scheduler generation.
+- Concurrent generation and unique races.
+- Payslip generation and authorization.
+- Manager team boundaries.
+- Status transitions and lifecycle.
+- Adjustment transaction failure.
+- Frontend Payroll behavior and role visibility.
+- Frontend response-shape mismatch.
+
+J. RUNTIME AND API FINDINGS
+
+Frontend/backend endpoint compatibility:
+- getMyPayroll -> GET /payroll/my: compatible.
+- getPayroll -> GET /payroll?employeeId=: compatible but largely unused by main hook.
+- runPayroll -> POST /payroll/run: compatible.
+- addPayrollAdjustment -> POST /payroll/others: response-shape mismatch.
+- downloadPayslip -> GET /payroll/payslip/:id: compatible.
+- generatePayslip -> POST /payroll/generate-payslip: compatible.
+- salary assignment -> POST /salary/assign: compatible through flexible body mapping.
+- unassigned employees -> GET /salary/unassigned-employees: compatible.
+
+Important mismatches:
+- Backend adjustment endpoint returns updated Payroll, while frontend expects PayrollAdjustment.
+- Payroll history does not include others, while frontend expects optional others.
+- Frontend displays conveyance, but backend Payroll does not persist it.
+- Frontend salary defaults may differ from database structures.
+- Frontend route visibility differs from backend team authorization.
+- Frontend converts authorization/server errors into empty arrays.
+- Frontend RunPayrollDto requires employeeId in TypeScript while runtime also supports empCode.
+
+K. ISSUES BY SEVERITY
+
+CRITICAL
+- No approval, finalization, or payment workflow exists despite the status enum.
+- Manual and scheduled Payroll use different periods.
+- Payroll generation lacks transaction/concurrency protection.
+- Adjustment creation and totals update are not atomic.
+- Complete immutable lifecycle enforcement is absent.
+
+HIGH
+- Adjustment response shape is incompatible with frontend expectations.
+- Payroll history omits adjustments.
+- Employees see adjustment controls that backend rejects.
+- Conveyance is calculated/displayed but not persisted.
+- Approved leave may include weekends and holidays.
+- Holiday location rules are not applied to Payroll.
+- Salary raise behavior conflicts with frontend behavior.
+- No integration test covers actual payroll persistence.
+
+MEDIUM
+- Scheduler duplicates calculation logic.
+- Attendance lookup differs between manual and scheduled paths.
+- healthInsurance and pfBase are unused.
+- Frontend swallows many Payroll errors as empty results.
+- Payslip omits adjustments, conveyance, and payroll period.
+- Team schedule depends on team name text.
+- Payroll has no update timestamp or audit history.
+- Employment start/exit dates are not applied.
+
+LOW
+- Frontend has extensive any usage.
+- Payslip company name is hardcoded.
+- Frontend optionally expects Payroll.updatedAt, which is absent from schema.
+- Salary structure ID is manually entered.
+- Empty states do not distinguish no data from authorization/server errors.
+
+L. WHAT IS ALREADY WORKING CORRECTLY
+
+- JWT and role guards protect controller entry points.
+- Org-wide roles are consistently recognized for core Payroll operations.
+- Employee self-service uses /payroll/my.
+- Team-manager payslip access uses server-side checks.
+- Payroll period uniqueness is database-enforced.
+- Latest effective salary selection works as implemented.
+- Input normalization validates employee, month, and year.
+- Working-day logic is centralized.
+- Sundays, Saturdays, Sales Saturdays, and holidays are handled deterministically.
+- Approved leave is prorated across month boundaries.
+- Finalized and paid records reject adjustments.
+- Existing focused Payroll and Salary tests pass.
+
+M. WHAT IS MISSING
+
+- Approved payroll period model.
+- Approval, finalization, and payment workflow.
+- Status transition rules.
+- Batch processing.
+- Audit and payment metadata.
+- Transaction-safe generation and adjustment updates.
+- Complete frontend lifecycle controls.
+- Canonical calculation service shared by manual and scheduled paths.
+- Correct adjustment response contract.
+- Persisted conveyance handling.
+- Salary raise/effective-date workflow.
+- Location-aware holiday calculation.
+- Working-day-aware leave calculation.
+
+N. WHAT REQUIRES SCHEMA/DATABASE CHANGES
+
+Potential changes after business requirements are approved:
+- Approval, finalization, and payment metadata.
+- Payroll-period or batch model.
+- Status transition history.
+- Payroll audit records.
+- Conveyance field if required in final output.
+- Adjustment audit fields.
+- Payment reference/date.
+- Salary assignment overlap constraints.
+- Team working-calendar configuration.
+
+O. RECOMMENDED FINITE IMPLEMENTATION ORDER
+
+1. Approve the authoritative payroll period model.
+2. Approve working-day and leave-day rules.
+3. Define status lifecycle and transitions.
+4. Define role permissions for each lifecycle operation.
+5. Centralize calculation logic for manual and scheduled Payroll.
+6. Add transaction and concurrency protection.
+7. Finalize schema changes for lifecycle, payment, audit, and earnings fields.
+8. Implement backend lifecycle and authorization endpoints.
+9. Align frontend API response shapes and field mappings.
+10. Align frontend route visibility and management controls.
+11. Add integration tests for calculations, roles, lifecycle, concurrency, and cross-module behavior.
+12. Run migration status, backend tests, frontend tests, type checks, and builds.
+
+END OF REPORT

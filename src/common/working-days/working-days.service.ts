@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { HolidaysService } from '../../holidays/holidays.service';
+import { getBusinessDateKey } from '../../attendance/utils/business-date.util';
 
 @Injectable()
 export class WorkingDaysService {
@@ -19,7 +20,8 @@ export class WorkingDaysService {
 
     const isSales = employee.team?.name?.toUpperCase() === 'SALES';
     const eligibleDates = dates.filter((date) => {
-      const day = date.getDay();
+      const businessDate = getBusinessDateKey(date);
+      const day = new Date(`${businessDate}T00:00:00.000Z`).getUTCDay();
       return day !== 0 && (isSales || day !== 6);
     });
 

@@ -1,6 +1,53 @@
 import { BadRequestException } from '@nestjs/common';
 import { PayrollService } from './payroll.service';
 
+describe('PayrollService attendance classification', () => {
+  let service: PayrollService;
+
+  beforeEach(() => {
+    service = new PayrollService({} as any, {} as any, {} as any, {
+      getWorkingDates: jest.fn(),
+    } as any);
+  });
+
+  it.each([
+    [7, 1],
+    [4, 0.5],
+    [6 + 59 / 60, 0.5],
+    [3 + 59 / 60, 0],
+  ])('uses the canonical attendance classification for %s hours', (hours: number, expected: number) => {
+    const record = {
+      clockIn: new Date('2026-09-09T09:00:00.000Z'),
+      clockOut: new Date(Date.parse('2026-09-09T09:00:00.000Z') + hours * 60 * 60 * 1000),
+      totalHours: hours,
+      status: 'PRESENT',
+    };
+
+    expect((service as any).getAttendanceContribution(record)).toBe(expected);
+  });
+
+  it.each(['PRESENT', 'LATE'])('ignores open %s attendance records as payroll contribution', (status) => {
+    const record = {
+      clockIn: new Date('2026-09-09T09:00:00.000Z'),
+      clockOut: null,
+      totalHours: null,
+      status,
+    };
+
+    expect((service as any).getAttendanceContribution(record)).toBe(0);
+  });
+
+  it.each([
+    ['APPROVED', true],
+    ['PENDING', false],
+    ['REJECTED', false],
+    ['CANCELLED', false],
+  ])('treats %s leave according to actual leave status', (status: string, expected: boolean) => {
+    const leave = { status, startDate: new Date('2026-09-01'), endDate: new Date('2026-09-01'), totalDays: 1 };
+    expect((service as any).isApprovedLeave(leave)).toBe(expected);
+  });
+});
+
 describe('PayrollService.addOther', () => {
   let prisma: any;
   let employeesService: any;

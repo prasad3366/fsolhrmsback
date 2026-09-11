@@ -1,0 +1,586 @@
+FOODEEZ HRMS - COMPLETE LEAVE MODULE AUDIT
+============================================
+
+Audit date: 2026-09-10
+Scope: Read-only audit of the backend and frontend Leave implementation.
+Backend: C:\Users\GANESH\Desktop\hrms\backend\fsolback\hrms
+Frontend: C:\Users\GANESH\Desktop\hrms\frontened\finalhrmsfront
+Approved roles: SUPER_ADMIN, CEO, HR, FINANCE_MANAGER, IT_MANAGER, SALES_MANAGER, EMPLOYEE
+
+No application code, schema, migration, or configuration was modified while performing the audit.
+
+VALIDATION
+----------
+- Backend Leave-focused tests: 54 passed, 0 failed.
+- Frontend TypeScript check: passed.
+- No dedicated frontend Leave test file was found.
+
+A. CURRENT LEAVE ARCHITECTURE
+-----------------------------
+
+Backend files:
+- src/leave/leave.controller.ts
+- src/leave/leave.service.ts
+- src/leave/leave.scheduler.ts
+- src/leave/leave.module.ts
+- src/leave/dto/create-leave.dto.ts
+- src/leave/dto/reject-leave.dto.ts
+- src/leave/utils/financial-year.util.ts
+- src/common/working-days/working-days.service.ts
+- src/common/authorization/authorization.service.ts
+- src/modules/settings/services/leave-policy.service.ts
+
+Frontend files:
+- src/modules/leave/LeaveManagement.tsx
+- src/hooks/useLeave.ts
+- src/services/api.ts
+- src/components/leave/ApplyLeaveModal.tsx
+- src/components/leave/ApproveRejectLeaveModal.tsx
+- src/components/leave/CarryForwardModal.tsx
+- src/components/leave/MedicalCertificateModal.tsx
+- src/App.tsx
+- src/components/layout/Sidebar.tsx
+
+Leave is registered through LeaveModule and uses JwtAuthGuard. The service depends on
+PrismaService, HolidaysService, AuthorizationService, and WorkingDaysService.
+
+B. CURRENT END-TO-END FLOW
+--------------------------
+
+Apply leave:
+Frontend LeaveManagement -> useLeave.applyLeave -> api.applyLeave ->
+POST /leaves/apply -> JwtAuthGuard -> authenticated req.user.employeeId ->
+AuthorizationService.canAccessEmployee -> LeaveService.applyLeave -> Prisma serializable
+transaction -> employee, leave type, policy, overlap, working dates, balance -> Leave PENDING.
+
+Approve:
+Frontend approval modal -> useLeave.approveLeave -> api.approveLeave ->
+PATCH /leaves/approve/:id -> JwtAuthGuard -> controller management access ->
+LeaveService.approveLeave -> authenticated approver Employee -> organization/team check ->
+serializable transaction -> conditional PENDING to APPROVED -> balance used increment -> response.
+
+Reject:
+Frontend rejection modal -> useLeave.rejectLeave -> api.rejectLeave ->
+PATCH /leaves/reject/:id with { remarks } -> JwtAuthGuard -> controller management access ->
+LeaveService.rejectLeave -> approver/team check -> Leave status REJECTED -> response.
+Rejection is not transactional and does not require the current status to be PENDING.
+
+History:
+GET /leaves/history?page=&limit=
+- EMPLOYEE: own records only.
+- IT_MANAGER/SALES_MANAGER: all records are loaded, then filtered in memory by managed team.
+- SUPER_ADMIN/CEO/HR: organization-wide records.
+- FINANCE_MANAGER: controller authorization denies Leave history access.
+
+Pending:
+GET /leaves/pending
+- EMPLOYEE denied.
+- Organization roles receive all PENDING records.
+- IT_MANAGER/SALES_MANAGER receive managed-team records.
+
+All:
+GET /leaves/all
+- EMPLOYEE denied.
+- Organization roles receive all statuses.
+- IT_MANAGER/SALES_MANAGER receive managed-team records.
+
+Balance:
+GET /leaves/balance?yearStart=
+- EMPLOYEE can read own balance.
+- Organization-wide roles can read balances for all employees.
+- Managers and FINANCE_MANAGER are denied by Leave controller authorization.
+
+Self history:
+GET /leaves/self/history
+Uses authenticated employee identity and returns that employee's records.
+
+Self balance:
+GET /leaves/self/balance?yearStart=
+Uses authenticated employee identity, creates missing balances, then returns balances.
+
+Carry-forward:
+POST /leaves/carry-forward with { leaveTypeId, yearStart }
+Uses authenticated employee identity and directly updates the current balance row.
+There is no pending carry-forward approval state.
+
+Cancellation:
+No Leave cancellation endpoint or service method exists.
+
+C. CURRENT BUSINESS RULES
+-------------------------
+
+Leave types are stored in LeaveType with yearlyQuota, carryForward, maxCarryLimit,
+monthlyAccrual, and requiresMedical. There is no backend LeaveType listing endpoint.
+The frontend hardcodes leave type IDs 1, 2, and 3.
+
+CreateLeaveDto accepts:
+- leaveTypeId
+- startDate
+- endDate
+- durationType
+- reason
+- medicalCertificate
+- isEmergency
+
+Reason must be non-empty and no longer than 500 characters.
+Dates must parse and startDate must not be after endDate.
+
+Duration values are FULL_DAY, HALF_DAY_FIRST, and HALF_DAY_SECOND.
+Half-day requires a single eligible working date and stores totalDays = 0.5.
+Full-day leave stores the number of eligible working dates.
+
+Leave applications are rejected when overlapping records exist, except REJECTED records.
+PENDING, APPROVED, and CANCELLED records block overlaps.
+Adjacent ranges do not overlap.
+
+Pending requests do not consume balance. Approval increments LeaveBalance.used.
+Rejection does not consume or restore balance.
+There is no approved-leave cancellation or restoration path.
+
+Medical certificates are required when the applicable policy/type requires them and totalDays
+is greater than two. The certificate content is stored as a string, normally frontend base64.
+
+Rejection remarks are required by the backend, although the frontend labels them optional.
+
+There is no implemented search or filtering for Leave history beyond pagination.
+There is no implemented Leave cancellation.
+There is no partial-day time-of-day model beyond the first/second half enum.
+
+D. ROLE AND AUTHORIZATION MATRIX
+--------------------------------
+
+Role             Own view  Create  View others       Approve/reject       Balance          Team access       Org-wide
+SUPER_ADMIN      Yes       Yes     Yes               Yes                  Yes              Yes               Yes
+CEO              Yes       Yes     Yes               Yes                  Yes              Yes               Yes
+HR               Yes       Yes     Yes               Yes                  Yes              Yes               Yes
+FINANCE_MANAGER  Self      Yes     No Leave access   No                   Self only        No                No
+IT_MANAGER       Yes       Yes     Managed teams     Managed teams        No               Own teams         No
+SALES_MANAGER    Yes       Yes     Managed teams     Managed teams        No               Own teams         No
+EMPLOYEE         Yes       Yes     No                No                   Own              No                No
+
+Apply does not accept a client employeeId. It uses authenticated req.user.employeeId.
+Manager authorization resolves authenticated manager employeeId -> Team.managerId ->
+target employee teamId. Changing request IDs does not bypass this check.
+
+FINANCE_MANAGER is organization-wide in some generic authorization scopes, but not Leave.
+The Employee 360 Leave route lists FINANCE_MANAGER, while LeaveService explicitly denies it.
+Legacy ADMIN is recognized by generic authorization code but is not an approved Prisma role.
+
+E. WORKING-DAY AND CALENDAR BEHAVIOR
+------------------------------------
+
+The shared WorkingDaysService is used by Leave, Attendance, Payroll, Dashboard, and WFH.
+
+Normal employees: Monday-Friday.
+Sales team employees: Monday-Saturday, when team.name exactly uppercases to SALES.
+Sunday: always excluded.
+Normal Saturday: excluded.
+Holiday: excluded.
+
+Holiday matching is date-based and does not filter by employee location.
+AttendancePolicy.workDays is not consulted.
+Employee location is not consulted.
+Employee joining date is not consulted.
+Employee exit date is not consulted.
+Employee active/inactive status is not consulted for Leave calculation.
+
+Leave calculation strips time through local calendar iteration, while dates are stored as
+DateTime values. Payroll also uses raw millisecond/calendar-span calculations. Datetime
+offsets and timezone boundaries can therefore produce inconsistent results.
+
+The monthly attendance summary numerically follows:
+Working Days = Present + Half Days + Absent + Leave.
+Approved leave dates are removed from present/half-day/absent classification and reported
+separately. presentEquivalentDays weights attendance half-days by 0.5.
+
+F. BALANCE LIFECYCLE
+--------------------
+
+Balance initialization has multiple paths:
+
+1. April scheduler creates all employee/leave-type rows using LeaveType.yearlyQuota.
+2. Self-balance creates missing rows using LeavePolicy.annualAllocation when available.
+3. Application creates missing rows using policy allocation or LeaveType.yearlyQuota.
+
+Balance consumption happens only at approval.
+Approval increments used by leave.totalDays.
+Loss-of-pay approval is allowed when policy enables loss-of-pay.
+
+Rejected requests do not restore anything because pending requests did not consume balance.
+No approved cancellation restoration exists.
+
+Automatic March carry-forward is commented out. Employee carry-forward directly updates
+carryForward on the existing balance. The operation is not transactional.
+
+Pending requests can collectively exceed available balance because they do not reserve days.
+There are no database checks preventing negative or inconsistent balance values.
+
+G. ATTENDANCE, PAYROLL, HOLIDAY, AND OTHER INTEGRATION
+-------------------------------------------------------
+
+Attendance:
+- Only APPROVED leave affects attendance summaries.
+- PENDING and REJECTED leave have no attendance effect.
+- Approved leave dates are excluded from inferred absences.
+- Approved leave dates are excluded from present/half-day/absent classification.
+- No persisted virtual attendance row is generated for Leave.
+
+Payroll:
+- Only APPROVED leave is included.
+- payableDays = presentDays + approvedLeaveDays.
+- lopDays = max(workingDays - payableDays, 0).
+- Month-spanning leave is prorated using raw calendar span.
+- Payroll may disagree with the Leave service's working-day-aware totalDays.
+
+Dashboard and reports query approved leave and reconstruct leave days independently.
+Payroll, Attendance, Dashboard, and Reports do not use identical prorating logic.
+
+Employee directory marks employees ON_LEAVE when approved leave overlaps today.
+It does not require the employee to be active.
+
+Employee 360 endpoint:
+GET /employees/:id/360/leave
+Returns employee status, current approved leave, balance summary, leave counts, and five
+recent records. The route lists FINANCE_MANAGER, but the service denies FINANCE_MANAGER.
+
+No Leave-specific notification or email workflow was found.
+
+H. API CONTRACT AUDIT
+---------------------
+
+POST /leaves/apply
+Auth: JWT plus employee profile and employee authorization.
+Body: CreateLeaveDto.
+Response: Created Leave record.
+Errors: invalid reason/date/type/duration, overlap, insufficient balance, medical requirement.
+
+PATCH /leaves/approve/:id
+Auth: JWT plus SUPER_ADMIN, CEO, HR, IT_MANAGER, or SALES_MANAGER management access.
+Body: none.
+Response: approved Leave including employee and leaveType.
+Errors: not found, already processed, unauthorized, missing balance, insufficient balance,
+serialization conflict.
+
+PATCH /leaves/reject/:id
+Auth: JWT plus same management access.
+Body: { remarks: string }.
+Response: rejected Leave including employee and leaveType.
+Errors: missing/long remarks, not found, unauthorized.
+Current implementation can reject statuses other than PENDING.
+
+GET /leaves/history?page=&limit=
+Auth: JWT. Role-dependent scope.
+Response for paginated paths:
+{ data: Leave[], pagination: { page, limit, total, totalPages } }.
+
+GET /leaves/pending
+Auth: JWT plus management access.
+Response: Leave[] with status PENDING.
+
+GET /leaves/all
+Auth: JWT plus management access.
+Response: Leave[] with all statuses.
+
+GET /leaves/balance?yearStart=
+Auth: employee self or organization-wide Leave roles.
+Response entries contain employeeId, employeeName, leaveType, allocated, used,
+carryForward, remaining.
+
+GET /leaves/self/history
+Auth: JWT and employee profile.
+Response: Leave[].
+
+GET /leaves/self/balance?yearStart=
+Auth: JWT and employee profile.
+Response entries contain leaveType, allocated, used, carryForward, remaining.
+The response does not contain leaveTypeId.
+
+POST /leaves/carry-forward
+Auth: JWT and employee profile.
+Body: { leaveTypeId, yearStart }.
+Response: { message }.
+Current endpoint directly changes carryForward.
+
+Frontend/backend mismatches:
+- Frontend calls /leaves/self/monthly, but backend has no matching route.
+- Frontend expects self-balance leave type IDs, but backend omits them.
+- Frontend sends medicalCertificateFileName, but backend does not persist it.
+- Frontend allows a HALF_DAY type in TypeScript, while backend accepts only the two enum values.
+- Frontend rejection text says remarks optional, backend requires remarks.
+
+I. FRONTEND UX AND STATE
+------------------------
+
+The page loads own history and balance on mount. Manager roles load paginated history.
+Loading, error, and success states exist.
+Approval/rejection buttons are disabled while a submission is active.
+After approval/rejection, manager history and current user's balance are refreshed.
+
+There is no Leave search or filtering UI.
+There is no cancellation UI.
+There is no explicit Leave refresh control.
+There is no optimistic status update.
+
+The manager table uses paginated history and combines it with pending/active resolved records
+in the hook. It does not consistently use the dedicated pending endpoint for the manager view.
+
+The frontend hardcodes Casual, Sick, and Maternity type options and hardcodes allocation
+normalization for those names. Backend policy values can therefore be overridden visually.
+
+Balance cards calculate allocated - used and ignore carryForward/backend remaining.
+
+The Sidebar displays Leave for every role, while the /leave route excludes FINANCE_MANAGER.
+
+J. DATABASE AND DATA-INTEGRITY FINDINGS
+---------------------------------------
+
+LeaveType:
+- Unique name.
+- yearlyQuota, carryForward, maxCarryLimit, monthlyAccrual, requiresMedical.
+
+LeaveBalance:
+- Unique employeeId + leaveTypeId + yearStart.
+- allocated, used, carryForward.
+
+Leave:
+- employeeId, leaveTypeId, yearStart, startDate, endDate, durationType, totalDays,
+  reason, status, remarks, certificate content, emergency flag, loss-of-pay flag.
+- Indexes on employeeId and yearStart.
+- Status enum includes CANCELLED.
+- Duration enum supports full day and two half-day values.
+
+Missing database protection:
+- No overlap constraint.
+- No startDate <= endDate constraint.
+- No totalDays > 0 constraint.
+- No non-negative balance constraints.
+- No unique duplicate-request constraint.
+- No persisted certificate filename.
+- No persisted approval/rejection actor.
+- No cancellation metadata.
+
+K. TEST COVERAGE
+----------------
+
+PASS:
+- Monday-Friday working days.
+- Sales Saturday.
+- Sunday exclusion.
+- Holiday exclusion.
+- Full-day calculation.
+- Half-day validation.
+- Date and reason validation.
+- Medical requirement validation.
+- Organization-role approval.
+- Manager team approval and denial outside team.
+- Carry-forward validation.
+- Employee 360 authorization basics.
+
+PARTIAL:
+- Full seven-role authorization matrix.
+- Balance lifecycle and concurrent balance changes.
+- Attendance integration.
+- Payroll integration.
+- Holiday-location behavior.
+- Manager read endpoint scoping.
+
+MISSING:
+- Frontend Leave tests.
+- Cancellation and restoration.
+- Pending balance reservation.
+- Concurrent duplicate applications.
+- Rejection versus approval race.
+- Database overlap enforcement.
+- Joining and exit date behavior.
+- Inactive employee behavior.
+- Leap-year and timezone-offset behavior.
+- Month/year boundary consistency.
+- Complete seven-role endpoint contract tests.
+- Frontend/backend API contract tests.
+- Certificate filename persistence.
+- Missing monthly endpoint coverage.
+
+L. FRONTEND/BACKEND MISMATCHES
+------------------------------
+
+1. Missing /leaves/self/monthly backend endpoint.
+2. Self-balance response omits leaveTypeId required by carry-forward UI.
+3. Certificate filename is sent by frontend but dropped by backend.
+4. Frontend supports a generic HALF_DAY type not accepted by backend.
+5. Frontend marks rejection remarks optional while backend requires them.
+6. Frontend balance display ignores carry-forward.
+7. Frontend hardcodes allocations and leave types.
+8. FINANCE_MANAGER is visible in the sidebar but blocked by the Leave route.
+9. Frontend uses hardcoded upcoming holidays in the Leave page.
+
+M. SECURITY FINDINGS
+--------------------
+
+No direct client-supplied employeeId bypass was found in Leave application.
+No direct client-supplied teamId or managerId bypass was found in manager approval.
+Manager team checks use authenticated manager identity and target employee team membership.
+
+Security/authorization risks:
+- Rejection can mutate an already processed record.
+- Manager history filtering loads all leave rows before filtering in memory.
+- Legacy ADMIN is accepted by generic authorization logic despite not being an approved role.
+- Employee 360 controller role declarations and service behavior disagree for Finance Manager.
+
+N. BUSINESS-LOGIC FINDINGS
+---------------------------
+
+- No cancellation workflow despite CANCELLED enum.
+- Pending requests do not reserve balance.
+- Leave policy has two sources of truth.
+- Employee lifecycle dates/status do not affect Leave eligibility or day calculation.
+- Location-specific holidays are treated as global holidays.
+- Approved leave can be calculated differently by Leave, Attendance, Payroll, Dashboard,
+  and Reports.
+- Rejection status transition is too permissive.
+
+O. PERFORMANCE AND CONCURRENCY FINDINGS
+---------------------------------------
+
+- Manager history/all/pending loads records and filters them in application code.
+- Manager filtering calls authorization/database access per leave record.
+- Leave approval is serializable and conditionally transitions status.
+- Leave application is serializable and handles P2034.
+- Rejection is not transactional and does not handle stale status.
+- Carry-forward is not transactional.
+- Monthly accrual updates balances one record at a time without a batch transaction.
+- No database overlap constraint exists.
+
+P. SEVERITY CLASSIFICATION
+--------------------------
+
+CRITICAL:
+- No currently verified critical issue was identified in the audited Leave paths.
+
+HIGH:
+- Rejection can overwrite non-pending leave.
+- Policy and LeaveType provide competing allocation sources.
+- Leave-day calculations disagree across payroll/reporting/attendance consumers.
+- Pending requests do not reserve balance.
+- No database overlap protection.
+
+MEDIUM:
+- Cancellation absent despite enum support.
+- Carry-forward is immediate and non-transactional.
+- Employee lifecycle ignored.
+- Holiday location ignored.
+- Self-balance/carry-forward contract mismatch.
+- Missing monthly endpoint.
+- Certificate filename not persisted.
+- Frontend hardcoded allocations.
+- Finance Manager route/sidebar mismatch.
+
+LOW:
+- Carry-forward omitted from frontend cards.
+- Hardcoded leave-type options.
+- Rejection remarks wording mismatch.
+
+Q. ALREADY-WORKING BEHAVIOR
+----------------------------
+
+- JWT authentication protects Leave routes.
+- Application uses authenticated employee identity.
+- Client cannot choose another employee for application.
+- IT_MANAGER and SALES_MANAGER team scoping is enforced server-side.
+- Approval is serializable and conditionally changes PENDING records.
+- Approval balance update is in the same transaction.
+- Normal/Sales Saturday/Sunday/holiday behavior is tested.
+- Half-day behavior is tested.
+- Focused backend Leave tests pass.
+- Frontend TypeScript compilation passes.
+
+R. MISSING OR INCOMPLETE BEHAVIOR
+---------------------------------
+
+- Cancellation.
+- Approved-leave restoration.
+- Pending balance reservation.
+- One authoritative Leave policy source.
+- Unified leave-day calculation across consumers.
+- Employee lifecycle handling.
+- Location-aware holiday handling.
+- Complete frontend/backend contract alignment.
+- Frontend Leave tests.
+- Full concurrency and boundary testing.
+
+S. ITEMS REQUIRING SCHEMA CHANGES
+---------------------------------
+
+- Database overlap enforcement.
+- Certificate filename persistence.
+- Cancellation metadata/state, if required by the final business rules.
+- Approval/rejection actor fields, if auditability is required.
+- Pending carry-forward approval state, if required.
+- Reservation ledger or per-request reservation model, if pending balance reservation is required.
+- Database checks for valid dates and non-negative balances.
+
+T. ITEMS FIXABLE WITHOUT SCHEMA CHANGES
+---------------------------------------
+
+- Restrict rejection to PENDING and make it transactional.
+- Unify service-level day calculations.
+- Apply lifecycle checks.
+- Apply holiday location checks.
+- Correct authorization inconsistencies.
+- Add missing API endpoint where existing data is sufficient.
+- Return leaveTypeId in existing balance response.
+- Remove frontend hardcoded allocations.
+- Use backend remaining balance in frontend.
+- Align frontend route/sidebar role visibility.
+- Align frontend rejection wording and duration types.
+- Add backend and frontend tests.
+
+U. SAFEST FUTURE IMPLEMENTATION ORDER
+-------------------------------------
+
+1. Confirm desired business rules for cancellation, pending reservation, payroll treatment,
+   Finance Manager access, employee lifecycle, and holiday location.
+2. Select one authoritative Leave policy source.
+3. Select one authoritative working-day calculation used by all consumers.
+4. Correct status transitions and transactional behavior.
+5. Decide whether database overlap and balance constraints are required.
+6. Resolve lifecycle and holiday-location rules.
+7. Stabilize API responses and frontend contracts.
+8. Align frontend role visibility and Leave UI behavior.
+9. Add complete seven-role, boundary, integration, and concurrency tests.
+10. Only then design migrations and data backfills.
+
+FINAL STATUS
+------------
+
+Already working correctly:
+- Authentication.
+- Authenticated employee identity for application.
+- Team-scoped manager authorization.
+- Serializable application and approval transactions.
+- Working-day tests for normal employees, Sales Saturday, Sunday, and holidays.
+- Half-day validation.
+
+Incomplete or incorrect:
+- Rejection status protection.
+- Cancellation.
+- Balance reservation/restoration.
+- Policy consistency.
+- Cross-module calculation consistency.
+- Employee lifecycle and holiday-location handling.
+- Several frontend/backend contracts.
+- Frontend Leave tests.
+
+Schema changes potentially required:
+- Overlap constraints.
+- Certificate filename.
+- Cancellation/audit/reservation state, depending on final requirements.
+- Database integrity checks.
+
+Can be fixed without schema changes:
+- Authorization and status-transition logic.
+- Calendar and lifecycle checks.
+- API contract and frontend behavior.
+- Calculation reuse.
+- Tests.
+
+The current implementation has been documented without applying any recommendation.

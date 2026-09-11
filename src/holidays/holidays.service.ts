@@ -193,7 +193,7 @@ export class HolidaysService {
 
     return holidays.filter(
       (holiday) =>
-        holiday.location === null ||
+        !this.normalizeLocation(holiday.location) ||
         this.normalizeLocation(holiday.location) === employeeLocation,
     );
   }

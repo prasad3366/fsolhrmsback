@@ -87,17 +87,22 @@ describe('AttendanceService target summary', () => {
     expect(getSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('denies FINANCE_MANAGER attendance access even when the raw employee check would otherwise pass', async () => {
+  it('allows FINANCE_MANAGER attendance access through the authorization service', async () => {
     const authorizationService = {
       canAccessEmployee: jest.fn().mockResolvedValue(true),
     } as any;
     const service = new AttendanceService(prisma, holidayService, authorizationService);
 
+    jest.spyOn(service, 'getEmployeeMonthlySummary').mockResolvedValue({ employeeId: 7 } as any);
+
     await expect(
       service.getTargetEmployeeAttendanceSummary({ id: 1, role: 'FINANCE_MANAGER', employeeId: 10 }, 7, '2026-09'),
-    ).rejects.toThrow(ForbiddenException);
+    ).resolves.toEqual(expect.objectContaining({ employeeId: 7 }));
 
-    expect(authorizationService.canAccessEmployee).not.toHaveBeenCalled();
+    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(
+      { id: 1, role: 'FINANCE_MANAGER', employeeId: 10 },
+      7,
+    );
   });
 });
 
@@ -139,7 +144,7 @@ describe('AttendanceService employee scope', () => {
     );
   });
 
-  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('allows %s to search active employees organization-wide', async (role) => {
+  it.each(['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER'])('allows %s to search active employees organization-wide', async (role) => {
     const service = new AttendanceService(prisma, holidayService);
 
     await service.getAttendanceEmployees({ user: { employeeId: 1, role } }, '7');
@@ -194,12 +199,16 @@ describe('AttendanceService punch transactions', () => {
     authorizationService.canAccessEmployee.mockResolvedValue(true);
   });
 
-  it('commits the normal punch-in log and Attendance upsert together', async () => {
+  it('commits the canonical punch-in record and log together', async () => {
     const attendanceLogCreate = jest.fn().mockResolvedValue({ id: 1 });
-    const attendanceUpsert = jest.fn().mockResolvedValue({ id: 2 });
+    const attendanceRecordCreate = jest.fn().mockResolvedValue({ id: 2, clockIn: new Date() });
     const transaction = jest.fn(async (callback) => callback({
       attendanceLog: { create: attendanceLogCreate },
-      attendance: { findUnique: jest.fn().mockResolvedValue(null), upsert: attendanceUpsert },
+      attendanceRecord: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: attendanceRecordCreate,
+      },
+      attendancePolicy,
     }));
     const prisma = {
       employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70, status: 'ACTIVE', user: { email: 'test@example.com' } }) },
@@ -218,22 +227,32 @@ describe('AttendanceService punch transactions', () => {
     } as any;
     const service = new AttendanceService(prisma, holidayService, authorizationService);
 
-    await expect(service.punchIn(7, 1, 2)).resolves.toEqual({ id: 2 });
+    await expect(service.punchIn(7, 1, 2)).resolves.toEqual(
+      expect.objectContaining({ id: 2, locationStatus: 'OUTSIDE' }),
+    );
 
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(attendanceLogCreate).toHaveBeenCalledWith({ data: { employeeId: 7, type: 'IN' } });
-    expect(attendanceUpsert).toHaveBeenCalledTimes(1);
+    expect(attendanceLogCreate).toHaveBeenCalledWith({
+      data: { employeeId: 7, type: 'IN', time: expect.any(Date) },
+    });
+    expect(attendanceRecordCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: AttendanceStatus.IN_PROGRESS }),
+    }));
   });
 
-  it('rolls back the punch-in transaction when Attendance upsert fails', async () => {
+  it('rolls back the punch-in transaction when the canonical record fails', async () => {
     const attendanceLogCreate = jest.fn().mockResolvedValue({ id: 1 });
-    const attendanceUpsert = jest.fn().mockRejectedValue(new Error('attendance write failed'));
+    const attendanceRecordCreate = jest.fn().mockRejectedValue(new Error('attendance write failed'));
     let committed = false;
     const transaction = jest.fn(async (callback) => {
       try {
         const result = await callback({
           attendanceLog: { create: attendanceLogCreate },
-          attendance: { findUnique: jest.fn().mockResolvedValue(null), upsert: attendanceUpsert },
+          attendanceRecord: {
+            findUnique: jest.fn().mockResolvedValue(null),
+            create: attendanceRecordCreate,
+          },
+          attendancePolicy,
         });
         committed = true;
         return result;
@@ -255,16 +274,48 @@ describe('AttendanceService punch transactions', () => {
     await expect(service.punchIn(7, 1, 2)).rejects.toThrow('attendance write failed');
 
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(attendanceLogCreate).toHaveBeenCalledTimes(1);
+    expect(attendanceLogCreate).toHaveBeenCalledTimes(0);
     expect(committed).toBe(false);
   });
 
-  it('commits the normal punch-out log and Attendance update together', async () => {
+  it('maps a concurrent unique-constraint punch-in race to the intended duplicate-clock-in error', async () => {
     const attendanceLogCreate = jest.fn().mockResolvedValue({ id: 1 });
-    const attendanceUpdate = jest.fn().mockResolvedValue({ id: 2 });
+    const attendeeRecordCreate = jest.fn().mockRejectedValue({ code: 'P2002' });
     const transaction = jest.fn(async (callback) => callback({
       attendanceLog: { create: attendanceLogCreate },
-      attendance: { findUnique: jest.fn().mockResolvedValue({ id: 2, punchIn: new Date(), punchOut: null }), update: attendanceUpdate },
+      attendanceRecord: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: attendeeRecordCreate,
+      },
+      attendancePolicy,
+    }));
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70, status: 'ACTIVE', user: { email: 'test@example.com' } }) },
+      attendanceRecord: attendanceRecord(),
+      attendancePolicy,
+      attendance: { findUnique: jest.fn().mockResolvedValue(null) },
+      wFHRequest: { findFirst: jest.fn().mockResolvedValue(null) },
+      officeLocation: { findFirst: jest.fn().mockResolvedValue(null) },
+      $transaction: transaction,
+    } as any;
+    const service = new AttendanceService(prisma, holidayService, authorizationService);
+
+    await expect(service.punchIn(7, 1, 2)).rejects.toThrow(BadRequestException);
+    await expect(service.punchIn(7, 1, 2)).rejects.toThrow('Already clocked in');
+    expect(attendanceLogCreate).toHaveBeenCalledTimes(0);
+  });
+
+  it('commits the canonical punch-out update and log together', async () => {
+    const attendanceLogCreate = jest.fn().mockResolvedValue({ id: 1 });
+    const attendanceUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const attendanceFindUnique = jest.fn().mockResolvedValue({ id: 2, clockIn: new Date(Date.now() - 8 * 3600000), clockOut: new Date(), totalHours: 8, status: AttendanceStatus.PRESENT });
+    const transaction = jest.fn(async (callback) => callback({
+      attendanceLog: { create: attendanceLogCreate },
+      attendanceRecord: {
+        findUnique: attendanceFindUnique,
+        updateMany: attendanceUpdateMany,
+      },
+      attendancePolicy,
     }));
     const prisma = {
       employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70, status: 'ACTIVE', user: { email: 'test@example.com' } }) },
@@ -282,22 +333,18 @@ describe('AttendanceService punch transactions', () => {
     } as any;
     const service = new AttendanceService(prisma, holidayService, authorizationService);
 
-    await expect(service.punchOut(7, 1, 2)).resolves.toEqual({ id: 2 });
+    await expect(service.punchOut(7, 1, 2)).resolves.toEqual(expect.objectContaining({ id: 2, status: AttendanceStatus.PRESENT, totalHours: 8 }));
 
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(attendanceLogCreate).toHaveBeenCalledWith({ data: { employeeId: 7, type: 'OUT' } });
-    expect(attendanceUpdate).toHaveBeenCalledTimes(1);
+    expect(attendanceLogCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ employeeId: 7, type: 'OUT' }) }));
+    expect(attendanceUpdateMany).toHaveBeenCalledTimes(1);
   });
 
-  it('creates a fallback attendance record when punch-out has no punch-in record', async () => {
+  it('rejects punch-out when no canonical check-in exists', async () => {
     const attendanceLogCreate = jest.fn().mockResolvedValue({ id: 1 });
-    const attendanceUpsert = jest.fn().mockResolvedValue({ id: 2, punchOut: expect.any(Date) });
     const transaction = jest.fn(async (callback) => callback({
       attendanceLog: { create: attendanceLogCreate },
-      attendance: {
-        findFirst: jest.fn().mockResolvedValue(null),
-        upsert: attendanceUpsert,
-      },
+      attendanceRecord: { findUnique: jest.fn().mockResolvedValue(null) },
     }));
     const prisma = {
       employee: {
@@ -313,34 +360,23 @@ describe('AttendanceService punch transactions', () => {
     } as any;
     const service = new AttendanceService(prisma, holidayService, authorizationService);
 
-    await expect(service.punchOut(7, 1, 2)).resolves.toEqual(
-      expect.objectContaining({ id: 2 }),
-    );
-
-    expect(attendanceLogCreate).toHaveBeenCalledWith({
-      data: { employeeId: 7, type: 'OUT' },
-    });
-    expect(attendanceUpsert).toHaveBeenCalledWith({
-      where: expect.objectContaining({ employeeId_date: expect.objectContaining({ employeeId: 7 }) }),
-      update: expect.objectContaining({ punchOut: expect.any(Date) }),
-      create: expect.objectContaining({
-        employeeId: 7,
-        punchIn: expect.any(Date),
-        punchOut: expect.any(Date),
-        totalHours: 0,
-      }),
-    });
+    await expect(service.punchOut(7, 1, 2)).rejects.toThrow('No active check-in found');
+    expect(attendanceLogCreate).not.toHaveBeenCalled();
   });
 
   it('rolls back the punch-out transaction when Attendance update fails', async () => {
     const attendanceLogCreate = jest.fn().mockResolvedValue({ id: 1 });
-    const attendanceUpdate = jest.fn().mockRejectedValue(new Error('attendance update failed'));
+    const attendanceUpdateMany = jest.fn().mockRejectedValue(new Error('attendance update failed'));
     let committed = false;
     const transaction = jest.fn(async (callback) => {
       try {
         const result = await callback({
           attendanceLog: { create: attendanceLogCreate },
-          attendance: { findUnique: jest.fn().mockResolvedValue({ id: 2, punchIn: new Date(), punchOut: null }), update: attendanceUpdate },
+          attendanceRecord: {
+            findUnique: jest.fn().mockResolvedValue({ id: 2, clockIn: new Date(Date.now() - 8 * 3600000), clockOut: null }),
+            updateMany: attendanceUpdateMany,
+          },
+          attendancePolicy,
         });
         committed = true;
         return result;
@@ -362,32 +398,137 @@ describe('AttendanceService punch transactions', () => {
     await expect(service.punchOut(7, 1, 2)).rejects.toThrow('attendance update failed');
 
     expect(transaction).toHaveBeenCalledTimes(1);
-    expect(attendanceLogCreate).toHaveBeenCalledTimes(1);
+    expect(attendanceLogCreate).toHaveBeenCalledTimes(0);
     expect(committed).toBe(false);
   });
 
-  it('preserves duplicate punch-in and punch-out errors before opening a transaction', async () => {
-    const transaction = jest.fn();
+  it('preserves duplicate punch-in and punch-out errors without writing logs', async () => {
+    const transaction = jest.fn(async (callback) => callback({
+      attendanceRecord: {
+        findUnique: jest.fn()
+          .mockResolvedValueOnce({ clockIn: new Date(), clockOut: null })
+          .mockResolvedValueOnce({ clockIn: new Date(), clockOut: new Date() }),
+      },
+      attendancePolicy: {
+        upsert: jest.fn().mockResolvedValue({
+          shiftStartTime: '09:00',
+          shiftEndTime: '18:00',
+          gracePeriodMins: 15,
+          earlyCheckoutMins: 30,
+          halfDayHours: 4,
+        }),
+      },
+    }));
     const prisma = {
       employee: {
-        findUnique: jest.fn()
-          .mockResolvedValueOnce({ id: 7, userId: 70, status: 'ACTIVE', user: { email: 'test@example.com' } })
-          .mockResolvedValueOnce({ id: 7, userId: 70, status: 'ACTIVE', user: { email: 'test@example.com' } }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 7,
+          userId: 70,
+          status: 'ACTIVE',
+          user: { email: 'test@example.com' },
+        }),
       },
       attendanceRecord: { findUnique: jest.fn().mockResolvedValue(null), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
       attendancePolicy,
-      attendance: {
-        findUnique: jest.fn()
-          .mockResolvedValueOnce({ punchIn: new Date() })
-          .mockResolvedValueOnce({ id: 2, punchIn: new Date(), punchOut: new Date() }),
-      },
       $transaction: transaction,
     } as any;
     const service = new AttendanceService(prisma, holidayService, authorizationService);
 
     await expect(service.punchIn(7)).rejects.toThrow(BadRequestException);
     await expect(service.punchOut(7)).rejects.toThrow(BadRequestException);
-    expect(transaction).not.toHaveBeenCalled();
+    expect(transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a second sequential checkout after the first successful one', async () => {
+    const clockIn = new Date('2026-09-10T09:00:00.000Z');
+    const firstClockOut = new Date('2026-09-10T17:00:00.000Z');
+    let closeAttempts = 0;
+    const attendanceRecord = {
+      findUnique: jest.fn().mockImplementation(async () => {
+        if (closeAttempts === 0) {
+          return { id: 9, userId: 70, date: new Date(2026, 8, 10), clockIn, clockOut: null };
+        }
+        return { id: 9, userId: 70, date: new Date(2026, 8, 10), clockIn, clockOut: firstClockOut, totalHours: 8, status: AttendanceStatus.PRESENT };
+      }),
+      updateMany: jest.fn().mockImplementation(async () => {
+        closeAttempts += 1;
+        return closeAttempts === 1 ? { count: 1 } : { count: 0 };
+      }),
+      update: jest.fn().mockResolvedValue({ id: 9, clockOut: firstClockOut, totalHours: 8, status: AttendanceStatus.PRESENT }),
+    };
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70, status: 'ACTIVE', user: { email: 'test@example.com' } }) },
+      attendanceRecord,
+      attendancePolicy: { upsert: jest.fn().mockResolvedValue({ shiftStartTime: '09:00', shiftEndTime: '18:00', gracePeriodMins: 15, earlyCheckoutMins: 30, halfDayHours: 4 }) },
+      attendanceLog: { create: jest.fn() },
+      $transaction: jest.fn(async (callback) => callback({
+        attendanceRecord,
+        attendancePolicy: { upsert: jest.fn().mockResolvedValue({ shiftStartTime: '09:00', shiftEndTime: '18:00', gracePeriodMins: 15, earlyCheckoutMins: 30, halfDayHours: 4 }) },
+        attendanceLog: { create: jest.fn() },
+      })),
+    } as any;
+    const service = new AttendanceService(prisma, holidayService, authorizationService);
+
+    jest.useFakeTimers().setSystemTime(firstClockOut);
+    try {
+      await expect(service.clockOut(70)).resolves.toEqual(expect.objectContaining({ clockOut: firstClockOut, totalHours: 8, status: AttendanceStatus.PRESENT }));
+      await expect(service.clockOut(70)).rejects.toThrow(BadRequestException);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('allows exactly one concurrent checkout to win and creates only one OUT log', async () => {
+    const clockIn = new Date('2026-09-10T09:00:00.000Z');
+    const successfulOut = new Date('2026-09-10T17:00:00.000Z');
+    const row = {
+      id: 12,
+      userId: 70,
+      date: new Date(2026, 8, 10),
+      clockIn,
+      clockOut: null,
+      totalHours: null,
+      status: AttendanceStatus.IN_PROGRESS,
+    };
+
+    let transactionCall = 0;
+    const transaction = jest.fn(async (callback) => {
+      transactionCall += 1;
+      const isWinningCall = transactionCall === 1;
+      return callback({
+        attendanceRecord: {
+          findUnique: jest.fn().mockResolvedValue(isWinningCall ? { ...row, clockOut: successfulOut, totalHours: 8, status: AttendanceStatus.PRESENT } : row),
+          updateMany: jest.fn().mockResolvedValue({ count: isWinningCall ? 1 : 0 }),
+        },
+        attendancePolicy: { upsert: jest.fn().mockResolvedValue({ shiftStartTime: '09:00', shiftEndTime: '18:00', gracePeriodMins: 15, earlyCheckoutMins: 30, halfDayHours: 4 }) },
+        attendanceLog: { create: jest.fn().mockResolvedValue({ id: isWinningCall ? 1 : 0, type: 'OUT', time: successfulOut }) },
+      });
+    });
+
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70, status: 'ACTIVE', user: { email: 'test@example.com' } }) },
+      attendanceRecord: { findUnique: jest.fn().mockResolvedValue(row), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      attendancePolicy: { upsert: jest.fn().mockResolvedValue({ shiftStartTime: '09:00', shiftEndTime: '18:00', gracePeriodMins: 15, earlyCheckoutMins: 30, halfDayHours: 4 }) },
+      attendanceLog: { create: jest.fn() },
+      $transaction: transaction,
+    } as any;
+
+    const service = new AttendanceService(prisma, holidayService, authorizationService);
+
+    jest.useFakeTimers().setSystemTime(successfulOut);
+    try {
+      const result = await Promise.allSettled([
+        service.clockOut(70),
+        service.clockOut(70),
+      ]);
+      const fulfilled = result.filter((item) => item.status === 'fulfilled');
+      const rejected = result.filter((item) => item.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((fulfilled[0] as PromiseFulfilledResult<any>).value).toEqual(expect.objectContaining({ totalHours: 8, status: AttendanceStatus.PRESENT }));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('rejects inactive punch-in before holiday checks, location lookup, or writes', async () => {
@@ -446,23 +587,27 @@ describe('AttendanceService punch transactions', () => {
 describe('AttendanceService historical reads', () => {
   it.each([
     [3 + 59 / 60, AttendanceStatus.ABSENT],
+    [4 + 1 / 60, AttendanceStatus.HALF_DAY],
     [4, AttendanceStatus.HALF_DAY],
     [6 + 59 / 60, AttendanceStatus.HALF_DAY],
     [7, AttendanceStatus.PRESENT],
     [8, AttendanceStatus.PRESENT],
   ])('calculates persisted checkout status at %s hours', async (hours, status) => {
     const clockOut = new Date('2026-09-09T17:00:00.000Z');
-    const attendanceRecordUpdate = jest.fn().mockResolvedValue({ id: 1, status });
+    const attendanceRecordUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const attendanceRecordFindUnique = jest.fn().mockResolvedValue({
+      id: 1,
+      clockIn: new Date(clockOut.getTime() - hours * 3600000),
+      clockOut,
+      totalHours: hours,
+      status,
+      isLate: false,
+    });
     const service = new AttendanceService({} as any, {} as any);
     const client = {
       attendanceRecord: {
-        findFirst: jest.fn().mockResolvedValue({
-          id: 1,
-          clockIn: new Date(clockOut.getTime() - hours * 3600000),
-          clockOut: null,
-          isLate: false,
-        }),
-        update: attendanceRecordUpdate,
+        findUnique: attendanceRecordFindUnique,
+        updateMany: attendanceRecordUpdateMany,
       },
       attendancePolicy: {
         upsert: jest.fn().mockResolvedValue({
@@ -479,14 +624,61 @@ describe('AttendanceService historical reads', () => {
       jest.useRealTimers();
     }
 
-    expect(attendanceRecordUpdate).toHaveBeenCalledWith({
-      where: { id: 1 },
+    expect(attendanceRecordUpdateMany).toHaveBeenCalledWith({
+      where: {
+        userId: 70,
+        date: expect.any(Date),
+        clockIn: { gte: new Date(0) },
+        clockOut: null,
+      },
       data: expect.objectContaining({
         clockOut,
         totalHours: expect.closeTo(hours, 8),
         status,
       }),
     });
+  });
+
+  it.each([AttendanceStatus.PRESENT, AttendanceStatus.LATE])(
+    'interprets an open record stored as %s as IN_PROGRESS in history',
+    async (storedStatus) => {
+      const date = new Date(2026, 8, 9);
+      const prisma = {
+        attendanceRecord: {
+          findMany: jest.fn().mockResolvedValue([{
+            date,
+            clockIn: new Date(date.getTime() + 9 * 3600000),
+            clockOut: null,
+            status: storedStatus,
+          }]),
+        },
+      } as any;
+      const service = new AttendanceService(prisma, {} as any);
+
+      await expect(service.getAttendanceHistory(70)).resolves.toEqual([
+        expect.objectContaining({ date, status: AttendanceStatus.IN_PROGRESS }),
+      ]);
+    },
+  );
+
+  it('classifies completed reads from clockIn and clockOut instead of stored status', async () => {
+    const clockIn = new Date('2026-09-09T09:00:00.000Z');
+    const clockOut = new Date('2026-09-09T17:00:00.000Z');
+    const prisma = {
+      attendanceRecord: {
+        findMany: jest.fn().mockResolvedValue([{
+          date: clockIn,
+          clockIn,
+          clockOut,
+          status: AttendanceStatus.ABSENT,
+        }]),
+      },
+    } as any;
+    const service = new AttendanceService(prisma, {} as any);
+
+    await expect(service.getAttendanceHistory(70)).resolves.toEqual([
+      expect.objectContaining({ status: AttendanceStatus.PRESENT }),
+    ]);
   });
 
   it('resolves today status from the authenticated employee identity', async () => {
@@ -498,6 +690,16 @@ describe('AttendanceService historical reads', () => {
     } as any, {} as any);
 
     await expect(service.getTodayStatusForEmployee(7)).resolves.toEqual({
+      hasPunchedIn: false,
+      hasPunchedOut: false,
+      punchInTime: null,
+      punchOutTime: null,
+      clockIn: null,
+      clockOut: null,
+      locationStatus: null,
+      totalHours: null,
+      status: null,
+      state: 'NOT_CHECKED_IN',
       clockedIn: false,
       clockedOut: false,
       durationElapsed: 0,
@@ -512,7 +714,7 @@ describe('AttendanceService historical reads', () => {
     });
   });
 
-  it('paginates the completed current-month result newest first with metadata', async () => {
+  it('returns the complete current-month result on one page with metadata', async () => {
     jest.useFakeTimers().setSystemTime(new Date(2026, 8, 30, 12));
     const presentDate = new Date(2026, 8, 29);
     const olderDate = new Date(2026, 8, 3);
@@ -529,19 +731,22 @@ describe('AttendanceService historical reads', () => {
     const service = new AttendanceService(prisma, {} as any, undefined, workingDaysService);
 
     try {
-      await expect(service.getAttendanceHistory(70, 9, 2026, undefined, 1, 1)).resolves.toEqual({
-        data: [expect.objectContaining({ date: presentDate })],
-        meta: { page: 1, pageSize: 1, total: 2, totalPages: 2, month: 9, year: 2026 },
+      await expect(service.getAttendanceHistory(70, 9, 2026, undefined, 1, 10)).resolves.toEqual({
+        data: [
+          expect.objectContaining({ date: presentDate }),
+          expect.objectContaining({ date: olderDate }),
+        ],
+        meta: { page: 1, pageSize: 2, total: 2, totalPages: 1, month: 9, year: 2026 },
       });
     } finally {
       jest.useRealTimers();
     }
   });
 
-  it('generates virtual absences before applying pagination', async () => {
+  it('merges virtual absences before returning the complete single page', async () => {
     jest.useFakeTimers().setSystemTime(new Date(2026, 8, 3, 12));
-    const presentDate = new Date(2026, 8, 2);
-    const absentDate = new Date(2026, 8, 1);
+    const presentDate = new Date(Date.UTC(2026, 8, 2, 12));
+    const absentDate = new Date(Date.UTC(2026, 8, 1, 12));
     const prisma = {
       employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
       attendanceRecord: {
@@ -554,16 +759,22 @@ describe('AttendanceService historical reads', () => {
     const service = new AttendanceService(prisma, {} as any, undefined, workingDaysService);
 
     try {
-      const result = await service.getAttendanceHistory(70, 9, 2026, undefined, 2, 1);
+      const result = await service.getAttendanceHistory(70, 9, 2026, undefined, 1, 10);
       expect(result).toEqual(expect.objectContaining({
-        meta: { page: 2, pageSize: 1, total: 2, totalPages: 2, month: 9, year: 2026 },
+        meta: { page: 1, pageSize: 2, total: 2, totalPages: 1, month: 9, year: 2026 },
       }));
-      expect((result as any).data[0]).toEqual(expect.objectContaining({
+      expect((result as any).data).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          date: presentDate,
+          status: AttendanceStatus.PRESENT,
+        }),
+        expect.objectContaining({
         date: absentDate,
         clockIn: null,
         clockOut: null,
         status: AttendanceStatus.ABSENT,
-      }));
+        }),
+      ]));
     } finally {
       jest.useRealTimers();
     }
@@ -596,15 +807,7 @@ describe('AttendanceService historical reads', () => {
       await service.getAttendanceHistory(70, 9, 2026, AttendanceStatus.PRESENT);
 
       expect(prisma.attendanceRecord.findMany).toHaveBeenCalledWith({
-        where: {
-          userId: 70,
-          date: {
-            gte: new Date(2026, 8, 1),
-            lte: new Date(2026, 8, 7, 23, 59, 59, 999),
-          },
-          status: AttendanceStatus.PRESENT,
-        },
-        orderBy: { date: 'asc' },
+        where: { userId: 70 },
       });
     } finally {
       jest.useRealTimers();
@@ -620,14 +823,7 @@ describe('AttendanceService historical reads', () => {
     await service.getAttendanceHistory(70, 1, 2026, undefined);
 
     expect(attendanceFindMany).toHaveBeenCalledWith({
-      where: {
-        userId: 70,
-        date: {
-          gte: new Date(2026, 0, 1),
-          lt: new Date(2026, 1, 1),
-        },
-      },
-      orderBy: { date: 'asc' },
+      where: { userId: 70 },
     });
   });
 
@@ -646,14 +842,14 @@ describe('AttendanceService historical reads', () => {
       orderBy: { date: 'asc' },
     });
     expect(prisma.attendanceRecord.findMany).toHaveBeenNthCalledWith(2, {
-      where: { userId: 70, status: AttendanceStatus.HALF_DAY },
+      where: { userId: 70 },
       orderBy: { date: 'asc' },
     });
   });
 
   it('returns virtual absences for missing working-day records', async () => {
-    const presentDate = new Date(2026, 8, 1);
-    const absentDate = new Date(2026, 8, 2);
+    const presentDate = new Date(Date.UTC(2026, 8, 1, 12));
+    const absentDate = new Date(Date.UTC(2026, 8, 2, 12));
     const prisma = {
       employee: {
         findUnique: jest.fn().mockResolvedValue({ id: 7 }),
@@ -721,14 +917,236 @@ describe('AttendanceService historical reads', () => {
 
       const records = await service.getAttendanceHistory(70, 9, 2026) as any[];
 
-      expect(records.every((record) => record.date <= new Date(2026, 8, 7, 23, 59, 59, 999))).toBe(true);
+      expect(records.every((record) => record.date <= new Date(Date.UTC(2026, 8, 7, 23, 59, 59, 999)))).toBe(true);
       expect(workingDaysService.getWorkingDates).toHaveBeenCalledWith(
         7,
-        expect.arrayContaining([new Date(2026, 8, 7)]),
+        expect.arrayContaining([new Date(Date.UTC(2026, 8, 7, 12))]),
       );
       expect(workingDaysService.getWorkingDates.mock.calls[0][1]).not.toContainEqual(
-        new Date(2026, 8, 8),
+        new Date(Date.UTC(2026, 8, 8)),
       );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('excludes adjacent and future records while returning all current-month records on page one', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-07T12:00:00.000Z'));
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
+      attendanceRecord: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 1,
+            userId: 70,
+            date: new Date('2026-08-31T00:00:00.000Z'),
+            clockIn: new Date('2026-08-31T04:00:00.000Z'),
+            clockOut: new Date('2026-08-31T12:00:00.000Z'),
+            status: AttendanceStatus.PRESENT,
+          },
+          {
+            id: 2,
+            userId: 70,
+            date: new Date('2026-09-06T00:00:00.000Z'),
+            clockIn: new Date('2026-09-06T04:00:00.000Z'),
+            clockOut: new Date('2026-09-06T12:00:00.000Z'),
+            status: AttendanceStatus.PRESENT,
+          },
+          {
+            id: 3,
+            userId: 70,
+            date: new Date('2026-09-08T00:00:00.000Z'),
+            clockIn: new Date('2026-09-08T04:00:00.000Z'),
+            clockOut: new Date('2026-09-08T12:00:00.000Z'),
+            status: AttendanceStatus.PRESENT,
+          },
+        ]),
+      },
+    } as any;
+    const workingDaysService = {
+      getWorkingDates: jest.fn().mockResolvedValue([]),
+    } as any;
+    const service = new AttendanceService(prisma, {} as any, undefined as any, workingDaysService);
+
+    try {
+      const result = await service.getAttendanceHistory(70, 9, 2026, undefined, 1, 10) as any;
+
+      expect(result).toEqual(expect.objectContaining({
+        data: [expect.objectContaining({ id: 2 })],
+        meta: { page: 1, pageSize: 1, total: 1, totalPages: 1, month: 9, year: 2026 },
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('returns an empty past month as page one of one', async () => {
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
+      attendanceRecord: { findMany: jest.fn().mockResolvedValue([]) },
+    } as any;
+    const workingDaysService = { getWorkingDates: jest.fn().mockResolvedValue([]) } as any;
+    const service = new AttendanceService(prisma, {} as any, undefined as any, workingDaysService);
+
+    await expect(service.getAttendanceHistory(70, 7, 2026, undefined, 1, 10)).resolves.toEqual({
+      data: [],
+      meta: { page: 1, pageSize: 1, total: 0, totalPages: 1, month: 7, year: 2026 },
+    });
+  });
+
+  it('returns the real current-day record with open and completed timestamps preserved', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-11T12:00:00.000Z'));
+    const clockIn = new Date('2026-09-11T07:28:00.000Z');
+    const clockOut = new Date('2026-09-11T12:30:00.000Z');
+    const realRecord = {
+      userId: 70,
+      date: new Date(2026, 8, 11),
+      clockIn,
+      clockOut: null,
+      totalHours: null,
+      status: AttendanceStatus.IN_PROGRESS,
+    };
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
+      attendanceRecord: { findMany: jest.fn().mockResolvedValue([realRecord]) },
+      leave: { findMany: jest.fn().mockResolvedValue([]) },
+    } as any;
+    const workingDaysService = {
+      getWorkingDates: jest.fn().mockResolvedValue([new Date(2026, 8, 11)]),
+    } as any;
+    const service = new AttendanceService(prisma, {} as any, undefined as any, workingDaysService);
+
+    try {
+      const openRecords = await service.getAttendanceHistory(70, 9, 2026) as any[];
+      expect(openRecords).toEqual([
+        expect.objectContaining({
+          date: realRecord.date,
+          clockIn,
+          clockOut: null,
+          totalHours: null,
+          status: AttendanceStatus.IN_PROGRESS,
+        }),
+      ]);
+
+      prisma.attendanceRecord.findMany.mockResolvedValue([{ ...realRecord, clockOut, totalHours: 5 }]);
+      const completedRecords = await service.getAttendanceHistory(70, 9, 2026) as any[];
+      expect(completedRecords).toEqual([
+        expect.objectContaining({
+          date: realRecord.date,
+          clockIn,
+          clockOut,
+          totalHours: 5,
+          status: AttendanceStatus.HALF_DAY,
+        }),
+      ]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('matches a UTC-midnight persisted date to the same Asia/Kolkata virtual business date', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-11T12:00:00.000Z'));
+    const realRecord = {
+      id: 21,
+      userId: 70,
+      date: new Date('2026-09-10T00:00:00.000Z'),
+      clockIn: new Date('2026-09-11T08:38:10.299Z'),
+      clockOut: null,
+      totalHours: null,
+      status: AttendanceStatus.IN_PROGRESS,
+      isLate: true,
+    };
+    const virtualBusinessDate = new Date('2026-09-10T18:30:00.000Z');
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
+      attendanceRecord: { findMany: jest.fn().mockResolvedValue([realRecord]) },
+      leave: { findMany: jest.fn().mockResolvedValue([]) },
+    } as any;
+    const workingDaysService = {
+      getWorkingDates: jest.fn().mockResolvedValue([virtualBusinessDate]),
+    } as any;
+    const service = new AttendanceService(prisma, {} as any, undefined as any, workingDaysService);
+
+    try {
+      const result = await service.getAttendanceHistory(70, 9, 2026) as any[];
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual(expect.objectContaining({
+        id: 21,
+        date: realRecord.date,
+        clockIn: realRecord.clockIn,
+        clockOut: null,
+        totalHours: null,
+        status: AttendanceStatus.IN_PROGRESS,
+        isLate: true,
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('preserves real completed ABSENT fields while keeping virtual ABSENT and real LEAVE behavior', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-11T12:00:00.000Z'));
+    const realAbsent = {
+      id: 22,
+      userId: 70,
+      date: new Date('2026-09-11T00:00:00.000Z'),
+      clockIn: new Date('2026-09-11T08:57:46.091Z'),
+      clockOut: new Date('2026-09-11T08:58:11.508Z'),
+      totalHours: 0.007,
+      status: AttendanceStatus.PRESENT,
+      isLate: true,
+      isEarlyCheckout: true,
+    };
+    const workingDate = new Date('2026-09-11T00:00:00.000Z');
+    const createService = (record: any, leave: any[] = []) => {
+      const prisma = {
+        employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
+        attendanceRecord: { findMany: jest.fn().mockResolvedValue(record ? [record] : []) },
+        leave: { findMany: jest.fn().mockResolvedValue(leave) },
+      } as any;
+      const workingDaysService = { getWorkingDates: jest.fn().mockResolvedValue([workingDate]) } as any;
+      return new AttendanceService(prisma, {} as any, undefined as any, workingDaysService);
+    };
+
+    try {
+      const absentResult = await createService(realAbsent).getAttendanceHistory(70, 9, 2026) as any[];
+      expect(absentResult).toEqual([
+        expect.objectContaining({
+          id: 22,
+          clockIn: realAbsent.clockIn,
+          clockOut: realAbsent.clockOut,
+          totalHours: realAbsent.totalHours,
+          status: AttendanceStatus.ABSENT,
+          isLate: true,
+          isEarlyCheckout: true,
+        }),
+      ]);
+
+      const virtualResult = await createService(null).getAttendanceHistory(70, 9, 2026) as any[];
+      expect(virtualResult).toEqual([
+        expect.objectContaining({
+          clockIn: null,
+          clockOut: null,
+          totalHours: 0,
+          status: AttendanceStatus.ABSENT,
+        }),
+      ]);
+
+      const leaveResult = await createService(realAbsent, [{
+        status: 'APPROVED',
+        startDate: workingDate,
+        endDate: workingDate,
+      }]).getAttendanceHistory(70, 9, 2026) as any[];
+      expect(leaveResult).toEqual([
+        expect.objectContaining({
+          id: 22,
+          clockIn: realAbsent.clockIn,
+          clockOut: realAbsent.clockOut,
+          totalHours: realAbsent.totalHours,
+          status: AttendanceStatus.LEAVE,
+        }),
+      ]);
     } finally {
       jest.useRealTimers();
     }
@@ -777,8 +1195,8 @@ describe('AttendanceService shared working-day integration', () => {
     ];
     const { service, prisma } = createService(workingDates);
     prisma.attendanceRecord.findMany.mockResolvedValue([
-      { date: new Date(2026, 7, 3), status: 'PRESENT' },
-      { date: new Date(2026, 7, 4), status: 'HALF_DAY' },
+      { date: new Date(2026, 7, 3), clockIn: new Date(2026, 7, 3, 9), clockOut: new Date(2026, 7, 3, 17), status: 'PRESENT' },
+      { date: new Date(2026, 7, 4), clockIn: new Date(2026, 7, 4, 9), clockOut: new Date(2026, 7, 4, 13), status: 'HALF_DAY' },
     ]);
     prisma.leave.findMany.mockResolvedValue([
       {
@@ -797,6 +1215,149 @@ describe('AttendanceService shared working-day integration', () => {
     expect(result.presentDays).toBe(1);
     expect(result.halfDays).toBe(1);
     expect(result.leaveDays).toBe(1);
+  });
+
+  it('counts multiple persisted attended records, including late attendance, as present', async () => {
+    const workingDates = [
+      new Date(2026, 7, 3),
+      new Date(2026, 7, 4),
+      new Date(2026, 7, 5),
+    ];
+    const { service, prisma } = createService(workingDates);
+    prisma.attendanceRecord.findMany.mockResolvedValue([
+      { date: new Date(2026, 7, 3), clockIn: new Date(2026, 7, 3, 9), clockOut: new Date(2026, 7, 3, 17), status: AttendanceStatus.PRESENT },
+      { date: new Date(2026, 7, 4), clockIn: new Date(2026, 7, 4, 9), clockOut: new Date(2026, 7, 4, 17), status: AttendanceStatus.PRESENT },
+      { date: new Date(2026, 7, 5), clockIn: new Date(2026, 7, 5, 9), clockOut: new Date(2026, 7, 5, 17), status: AttendanceStatus.LATE },
+    ]);
+    prisma.leave.findMany.mockResolvedValue([]);
+
+    const result = await service.getEmployeeMonthlySummary(7, '2026-08');
+
+    expect(result.presentDays).toBe(3);
+    expect(result.absentDays).toBe(0);
+    expect(result.attendancePercentage).toBe(100);
+    expect(result.workingDays).toBe(
+      result.presentDays + result.halfDays + result.absentDays + result.leaveDays,
+    );
+  });
+
+  it('counts historical records by clock-in business date and treats open records as absent', async () => {
+    const workingDates = [
+      new Date(Date.UTC(2026, 7, 3)),
+      new Date(Date.UTC(2026, 7, 4)),
+      new Date(Date.UTC(2026, 7, 5)),
+      new Date(Date.UTC(2026, 7, 6)),
+    ];
+    const { service, prisma } = createService(workingDates);
+    prisma.attendanceRecord.findMany.mockResolvedValue([
+      {
+        date: new Date('2026-08-02T00:00:00.000Z'),
+        clockIn: new Date('2026-08-03T04:00:00.000Z'),
+        clockOut: new Date('2026-08-03T12:00:00.000Z'),
+        status: AttendanceStatus.PRESENT,
+      },
+      {
+        date: new Date('2026-08-04T00:00:00.000Z'),
+        clockIn: new Date('2026-08-04T04:00:00.000Z'),
+        clockOut: new Date('2026-08-04T08:30:00.000Z'),
+        status: AttendanceStatus.PRESENT,
+      },
+      {
+        date: new Date('2026-08-05T00:00:00.000Z'),
+        clockIn: new Date('2026-08-05T04:00:00.000Z'),
+        status: AttendanceStatus.PRESENT,
+      },
+    ]);
+    prisma.leave.findMany.mockResolvedValue([]);
+
+    const result = await service.getEmployeeMonthlySummary(7, '2026-08');
+
+    expect(result).toEqual(expect.objectContaining({
+      workingDays: 4,
+      presentDays: 1,
+      halfDays: 1,
+      absentDays: 2,
+      leaveDays: 0,
+    }));
+    expect(result.workingDays).toBe(
+      result.presentDays + result.halfDays + result.absentDays + result.leaveDays,
+    );
+  });
+
+  it('calculates independent summaries for normal and Sales employees', async () => {
+    const normalWorkingDates = [
+      new Date(Date.UTC(2026, 7, 3)),
+      new Date(Date.UTC(2026, 7, 4)),
+    ];
+    const salesWorkingDates = [
+      new Date(Date.UTC(2026, 7, 7)),
+      new Date(Date.UTC(2026, 7, 8)),
+      new Date(Date.UTC(2026, 7, 9)),
+    ];
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockImplementation(({ where }: any) => where.id === 7
+          ? { id: 7, userId: 70, team: null }
+          : { id: 8, userId: 80, team: { name: 'SALES' } }),
+      },
+      attendanceRecord: {
+        findMany: jest.fn().mockImplementation(({ where }: any) => where.userId === 70
+          ? [{
+              date: new Date('2026-08-02T00:00:00.000Z'),
+              clockIn: new Date('2026-08-03T04:00:00.000Z'),
+              clockOut: new Date('2026-08-03T12:00:00.000Z'),
+              status: AttendanceStatus.PRESENT,
+            }]
+          : [{
+              date: new Date('2026-08-08T00:00:00.000Z'),
+              clockIn: new Date('2026-08-08T04:00:00.000Z'),
+              clockOut: new Date('2026-08-08T08:30:00.000Z'),
+              status: AttendanceStatus.PRESENT,
+            }, {
+              date: new Date('2026-08-09T00:00:00.000Z'),
+              clockIn: new Date('2026-08-09T04:00:00.000Z'),
+              status: AttendanceStatus.PRESENT,
+            }]),
+      },
+      leave: {
+        findMany: jest.fn().mockImplementation(({ where }: any) => where.employeeId === 7
+          ? [{ status: 'APPROVED', startDate: normalWorkingDates[1], endDate: normalWorkingDates[1] }]
+          : []),
+      },
+    } as any;
+    const workingDaysService = {
+      getWorkingDates: jest.fn().mockImplementation((employeeId: number) => (
+        employeeId === 7 ? normalWorkingDates : salesWorkingDates
+      )),
+    } as any;
+    const service = new AttendanceService(prisma, {} as any, undefined as any, workingDaysService);
+
+    const [normalSummary, salesSummary] = await Promise.all([
+      service.getEmployeeMonthlySummary(7, '2026-08'),
+      service.getEmployeeMonthlySummary(8, '2026-08'),
+    ]);
+
+    expect(normalSummary).toEqual(expect.objectContaining({
+      employeeId: 7,
+      workingDays: 2,
+      presentDays: 1,
+      leaveDays: 1,
+      absentDays: 0,
+    }));
+    expect(salesSummary).toEqual(expect.objectContaining({
+      employeeId: 8,
+      workingDays: 3,
+      presentDays: 0,
+      halfDays: 1,
+      absentDays: 2,
+      leaveDays: 0,
+    }));
+    expect(normalSummary.workingDays).toBe(
+      normalSummary.presentDays + normalSummary.halfDays + normalSummary.absentDays + normalSummary.leaveDays,
+    );
+    expect(salesSummary.workingDays).toBe(
+      salesSummary.presentDays + salesSummary.halfDays + salesSummary.absentDays + salesSummary.leaveDays,
+    );
   });
 
   it.each([
@@ -825,7 +1386,7 @@ describe('AttendanceService shared working-day integration', () => {
   });
 
   it('excludes a holiday for both a normal employee and a Sales Saturday', async () => {
-    const salesSaturday = new Date(2026, 7, 1);
+    const salesSaturday = new Date(Date.UTC(2026, 7, 1));
     const holidayService = {
       isHoliday: jest.fn(async (date: Date) =>
         date.getTime() === salesSaturday.getTime() ? { date } : null,
@@ -850,7 +1411,7 @@ describe('AttendanceService shared working-day integration', () => {
 
 describe('AttendanceService WFH location working-day integration', () => {
   const formatDate = (date: Date) =>
-    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
 
   const createService = ({
     teamName,
@@ -1017,6 +1578,6 @@ describe('AttendanceService WFH location working-day integration', () => {
 
     await service.punchIn(7, 1, 2);
 
-    expect(getWorkingDatesSpy).toHaveBeenCalledWith(7, [new Date(2026, 8, 7)]);
+    expect(getWorkingDatesSpy).toHaveBeenCalledWith(7, [new Date(Date.UTC(2026, 8, 7))]);
   });
 });

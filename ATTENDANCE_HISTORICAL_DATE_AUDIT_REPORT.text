@@ -1,0 +1,94 @@
+ATTENDANCE HISTORICAL DATE AUDIT REPORT
+=======================================
+
+Scope: Read-only audit of AttendanceRecord.date against the Asia/Kolkata business date derived from attendance timestamps.
+
+Code changes: NONE
+Database changes: NONE
+Migrations: NONE
+Records deleted: NONE
+
+1. SUMMARY
+==========
+
+Total AttendanceRecords checked: 18
+Records with proven persisted-date mismatch: 16
+Records requiring no correction: 2
+Unique-key conflicts: 6
+Non-conflicting records potentially safe to correct: 10
+
+The audit used clockIn as the primary attendance-date authority. Where clockOut existed, it derived the same Asia/Kolkata business date.
+
+2. AFFECTED RECORDS
+===================
+
+ID | User | Persisted Date | Clock In | Clock Out | Derived Business Date | Status | Safe to Correct | Conflict
+---|------|-----------------|----------|-----------|------------------------|--------|-----------------|---------
+1 | 1 | 2026-09-05 | 2026-09-06 13:42:33Z | 2026-09-06 15:34:44Z | 2026-09-06 | HALF_DAY | YES | None
+6 | 9 | 2026-09-06 | 2026-09-07 09:20:18Z | 2026-09-07 12:13:01Z | 2026-09-07 | HALF_DAY | NO | ID 7
+7 | 9 | 2026-09-07 | 2026-09-08 05:00:00Z | null | 2026-09-08 | LATE | NO | ID 11
+8 | 1 | 2026-09-07 | 2026-09-08 18:29:13Z | null | 2026-09-08 | LATE | NO | ID 10
+9 | 4 | 2026-09-08 | 2026-09-08 19:25:37Z | null | 2026-09-09 | PRESENT | YES | None
+10 | 1 | 2026-09-08 | 2026-09-08 19:27:48Z | null | 2026-09-09 | PRESENT | NO | ID 15
+11 | 9 | 2026-09-08 | 2026-09-08 19:35:18Z | null | 2026-09-09 | PRESENT | YES | None
+12 | 6 | 2026-09-08 | 2026-09-08 20:11:45Z | null | 2026-09-09 | PRESENT | YES | None
+13 | 7 | 2026-09-08 | 2026-09-08 20:14:48Z | null | 2026-09-09 | PRESENT | YES | None
+14 | 10 | 2026-09-08 | 2026-09-08 20:19:47Z | 2026-09-08 20:25:16Z | 2026-09-09 | HALF_DAY | YES | None
+15 | 1 | 2026-09-09 | 2026-09-10 13:45:18Z | null | 2026-09-10 | LATE | NO | ID 17
+17 | 1 | 2026-09-10 | 2026-09-11 06:47:40Z | null | 2026-09-11 | IN_PROGRESS | YES | None
+18 | 9 | 2026-09-10 | 2026-09-11 06:49:33Z | 2026-09-11 08:29:52Z | 2026-09-11 | ABSENT | YES | None
+19 | 4 | 2026-09-10 | 2026-09-11 07:28:04Z | null | 2026-09-11 | IN_PROGRESS | YES | None
+20 | 7 | 2026-09-10 | 2026-09-11 08:12:48Z | null | 2026-09-11 | IN_PROGRESS | YES | None
+21 | 6 | 2026-09-10 | 2026-09-11 08:38:10Z | 2026-09-11 08:47:49Z | 2026-09-11 | ABSENT | NO | ID 22
+
+3. UNIQUE-KEY CONFLICTS
+=======================
+
+The following corrections would violate the unique (userId, date) constraint:
+
+- ID 6 -> user 9, 2026-09-07 -> existing ID 7
+- ID 7 -> user 9, 2026-09-08 -> existing ID 11
+- ID 8 -> user 1, 2026-09-08 -> existing ID 10
+- ID 10 -> user 1, 2026-09-09 -> existing ID 15
+- ID 15 -> user 1, 2026-09-10 -> existing ID 17
+- ID 21 -> user 6, 2026-09-11 -> existing ID 22
+
+These records must not be updated until the duplicate attendance rows are manually reconciled.
+
+4. RECORDS REQUIRING NO CORRECTION
+==================================
+
+ID 3, user 5:
+- Persisted date: 2026-08-10
+- Derived Kolkata business date: 2026-08-10
+
+ID 22, user 6:
+- Persisted date: 2026-09-11
+- Derived Kolkata business date: 2026-09-11
+
+Record ID 22 is correctly persisted and requires no database correction.
+
+5. RECOMMENDED CORRECTIONS
+==========================
+
+The following records have timestamp-proven date mismatches and no unique-key conflict:
+
+1, 9, 11, 12, 13, 14, 17, 18, 19, 20
+
+For each record, the recommended correction is to update only AttendanceRecord.date to the Asia/Kolkata business date derived from clockIn.
+
+No changes should be made to timestamps, status, duration, or metadata.
+
+6. SAFETY ASSESSMENT
+====================
+
+A one-time correction script is not safe to run blindly across all affected records.
+
+It may be safe to update the 10 non-conflicting records after review and backup. The 6 conflicting records require an explicit reconciliation decision before any update.
+
+The audit found no reason to modify the 2 correctly persisted records.
+
+7. AUDIT CONCLUSION
+===================
+
+The audit was read-only. No AttendanceRecord was inserted, updated, upserted, or deleted.
