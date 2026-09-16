@@ -134,11 +134,39 @@ describe('ReportsService attendance export safety', () => {
     ]);
     const service = new ReportsService(
       {
-        employee: { findMany: jest.fn(), count: jest.fn() },
+        employee: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: 7,
+              userId: 20,
+              empCode: 'E7',
+              firstName: 'Open',
+              lastName: 'Record',
+              department: 'Engineering',
+            },
+          ]),
+          count: jest.fn(),
+        },
         attendanceRecord: { findMany: attendanceFindMany },
       } as any,
       { canAccessOrganizationWide: jest.fn().mockReturnValue(true) } as any,
       {} as any,
+      {
+        getAttendanceHistory: jest.fn().mockResolvedValue([
+          {
+            date: new Date(2026, 7, 3),
+            status: AttendanceStatus.IN_PROGRESS,
+            clockIn: new Date(2026, 7, 3, 9),
+            clockOut: null,
+          },
+          {
+            date: new Date(2026, 7, 4),
+            status: AttendanceStatus.PRESENT,
+            clockIn: new Date(2026, 7, 4, 9),
+            clockOut: new Date(2026, 7, 4, 17),
+          },
+        ]),
+      } as any,
     );
 
     await expect(service.getAttendanceReportData(undefined, undefined, { id: 1, role: 'HR' })).resolves.toEqual([

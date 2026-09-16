@@ -127,16 +127,6 @@ export class EmployeesService {
 
     if (this.authorizationService.canAccessOrganizationWide(user, 'employee')) {
       where = undefined;
-    } else if (
-      normalizedRole === 'IT_MANAGER' ||
-      normalizedRole === 'SALES_MANAGER'
-    ) {
-      const managedTeams = await this.prisma.team.findMany({
-        where: { managerId: Number(user.employeeId) },
-        select: { id: true },
-      });
-
-      where = { teamId: { in: managedTeams.map((team) => team.id) } };
     }
 
     const statisticsWhere = where;
@@ -169,6 +159,21 @@ export class EmployeesService {
 
     const hasQuery = Object.keys(query).length > 0;
     const today = new Date();
+    const directorySelect = {
+      id: true,
+      empCode: true,
+      firstName: true,
+      lastName: true,
+      department: true,
+      designation: true,
+      employmentType: true,
+      isExperienced: true,
+      dateOfJoining: true,
+      dateOfExit: true,
+      status: true,
+      teamId: true,
+      user: { select: { id: true, email: true, role: true, isActive: true } },
+    } as const;
     const currentLeave = {
       status: 'APPROVED' as const,
       startDate: { lte: today },
@@ -177,11 +182,7 @@ export class EmployeesService {
     if (!hasQuery) {
       return this.prisma.employee.findMany({
         where,
-        include: {
-          user: { select: { id: true, email: true, role: true, isActive: true } },
-          payrolls: { select: { id: true }, take: 1 },
-          salaries: { select: { id: true }, take: 1 },
-        },
+        select: directorySelect,
       });
     }
     if (query.status === 'ON_LEAVE') {
@@ -194,13 +195,13 @@ export class EmployeesService {
       : [{ [query.sortBy === 'empCode' ? 'empCode' : query.sortBy === 'department' ? 'department' : query.sortBy === 'dateOfJoining' ? 'dateOfJoining' : 'status']: sortDirection }];
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 25;
-    const include = {
-      user: { select: { id: true, email: true, role: true, isActive: true } },
+    const select = {
+      ...directorySelect,
       leaves: { where: currentLeave, select: { id: true }, take: 1 },
     };
     const [total, employees] = await Promise.all([
       this.prisma.employee.count({ where }),
-      this.prisma.employee.findMany({ where, include, orderBy, skip: (page - 1) * pageSize, take: pageSize }),
+      this.prisma.employee.findMany({ where, select, orderBy, skip: (page - 1) * pageSize, take: pageSize }),
     ]);
     const newJoinerStart = new Date(today);
     newJoinerStart.setDate(today.getDate() - 30);
@@ -266,6 +267,10 @@ export class EmployeesService {
   }
 
   async updateEmployee(employeeId: number, dto: Partial<CreateEmployeeDto>) {
+    const { role: _ignoredRole, ...safeDto } = dto as Partial<CreateEmployeeDto> & {
+      role?: unknown;
+    };
+
     const employee = await this.prisma.employee.findUnique({
       where: { id: employeeId },
       include: { user: true },
@@ -275,18 +280,18 @@ export class EmployeesService {
       throw new BadRequestException('Employee not found');
     }
 
-    if (dto.empCode && dto.empCode !== employee.empCode) {
+    if (safeDto.empCode && safeDto.empCode !== employee.empCode) {
       const existingByCode = await this.prisma.employee.findUnique({
-        where: { empCode: dto.empCode },
+        where: { empCode: safeDto.empCode },
       });
       if (existingByCode) {
         throw new BadRequestException('Employee code already exists');
       }
     }
 
-    if (dto.email && dto.email !== employee.user.email) {
+    if (safeDto.email && safeDto.email !== employee.user.email) {
       const existingEmail = await this.prisma.user.findUnique({
-        where: { email: dto.email },
+        where: { email: safeDto.email },
       });
       if (existingEmail && existingEmail.id !== employee.userId) {
         throw new BadRequestException('Email already exists');
@@ -298,11 +303,11 @@ export class EmployeesService {
     let shouldReactivateCredentials = false;
 
     // If status is being changed to INACTIVE OR if already INACTIVE
-    const newStatus = dto.status || employee.status;
+    const newStatus = safeDto.status || employee.status;
 
-    // Effective exit date after this update (dto.dateOfExit may explicitly clear it with null)
+    // Effective exit date after this update (safeDto.dateOfExit may explicitly clear it with null)
     const effectiveDateOfExit =
-      dto.dateOfExit !== undefined ? dto.dateOfExit : employee.dateOfExit;
+      safeDto.dateOfExit !== undefined ? safeDto.dateOfExit : employee.dateOfExit;
     let exitInPastOrToday = false;
     if (effectiveDateOfExit) {
       const exitDate = new Date(effectiveDateOfExit);
@@ -315,7 +320,7 @@ export class EmployeesService {
     if (newStatus === 'INACTIVE' || exitInPastOrToday) {
       shouldDeactivateCredentials = true;
     } else if (
-      (dto.status !== undefined || dto.dateOfExit !== undefined) &&
+      (safeDto.status !== undefined || safeDto.dateOfExit !== undefined) &&
       newStatus === 'ACTIVE'
     ) {
       // Employee is explicitly being (re)activated and has no past exit date
@@ -324,12 +329,12 @@ export class EmployeesService {
 
     // update linked user record where applicable
     const userUpdateData: any = {};
-    if (dto.email !== undefined) userUpdateData.email = dto.email;
-    if (dto.role !== undefined) userUpdateData.role = dto.role;
+    if (safeDto.email !== undefined) userUpdateData.email = safeDto.email;
 
     // Synchronize credentials with an explicitly supplied employee status.
-    if (dto.status !== undefined) {
-      userUpdateData.isActive = dto.status === 'ACTIVE';
+    // Role changes are never accepted through the generic employee update flow.
+    if (safeDto.status !== undefined) {
+      userUpdateData.isActive = safeDto.status === 'ACTIVE';
     } else if (shouldDeactivateCredentials) {
       userUpdateData.isActive = false;
     } else if (shouldReactivateCredentials) {
@@ -343,53 +348,53 @@ export class EmployeesService {
       }
     };
 
-    setIfDefined('empCode', dto.empCode);
-    setIfDefined('firstName', dto.firstName);
-    setIfDefined('lastName', dto.lastName);
-    setIfDefined('department', dto.department);
-    setIfDefined('designation', dto.designation);
-    setIfDefined('isExperienced', dto.isExperienced);
-    setIfDefined('employmentType', dto.employmentType);
-    setIfDefined('status', dto.status);
-    setIfDefined('sourceOfHire', dto.sourceOfHire);
-    setIfDefined('reportingManager', dto.reportingManager);
+    setIfDefined('empCode', safeDto.empCode);
+    setIfDefined('firstName', safeDto.firstName);
+    setIfDefined('lastName', safeDto.lastName);
+    setIfDefined('department', safeDto.department);
+    setIfDefined('designation', safeDto.designation);
+    setIfDefined('isExperienced', safeDto.isExperienced);
+    setIfDefined('employmentType', safeDto.employmentType);
+    setIfDefined('status', safeDto.status);
+    setIfDefined('sourceOfHire', safeDto.sourceOfHire);
+    setIfDefined('reportingManager', safeDto.reportingManager);
     setIfDefined(
       'currentExperience',
-      dto.currentExperience != null ? Number(dto.currentExperience) : undefined,
+      safeDto.currentExperience != null ? Number(safeDto.currentExperience) : undefined,
     );
-    setIfDefined('age', dto.age != null ? Number(dto.age) : undefined);
-    setIfDefined('gender', dto.gender);
-    setIfDefined('currentAddress', dto.currentAddress);
-    setIfDefined('permanentAddress', dto.permanentAddress);
-    setIfDefined('pincode', dto.pincode);
-    setIfDefined('city', dto.city);
-    setIfDefined('maritalStatus', dto.maritalStatus);
-    setIfDefined('phone', dto.phone);
-    setIfDefined('personalMobile', dto.personalMobile);
-    setIfDefined('panNumber', dto.panNumber);
-    setIfDefined('aadharNumber', dto.aadharNumber);
-    setIfDefined('pfNumber', dto.pfNumber);
-    setIfDefined('uanNumber', dto.uanNumber);
-    setIfDefined('bankAccountNumber', dto.bankAccountNumber);
-    setIfDefined('bankName', dto.bankName);
-    setIfDefined('ifscCode', dto.ifscCode);
+    setIfDefined('age', safeDto.age != null ? Number(safeDto.age) : undefined);
+    setIfDefined('gender', safeDto.gender);
+    setIfDefined('currentAddress', safeDto.currentAddress);
+    setIfDefined('permanentAddress', safeDto.permanentAddress);
+    setIfDefined('pincode', safeDto.pincode);
+    setIfDefined('city', safeDto.city);
+    setIfDefined('maritalStatus', safeDto.maritalStatus);
+    setIfDefined('phone', safeDto.phone);
+    setIfDefined('personalMobile', safeDto.personalMobile);
+    setIfDefined('panNumber', safeDto.panNumber);
+    setIfDefined('aadharNumber', safeDto.aadharNumber);
+    setIfDefined('pfNumber', safeDto.pfNumber);
+    setIfDefined('uanNumber', safeDto.uanNumber);
+    setIfDefined('bankAccountNumber', safeDto.bankAccountNumber);
+    setIfDefined('bankName', safeDto.bankName);
+    setIfDefined('ifscCode', safeDto.ifscCode);
 
-    if (dto.dateOfJoining !== undefined) {
+    if (safeDto.dateOfJoining !== undefined) {
       setIfDefined(
         'dateOfJoining',
-        dto.dateOfJoining ? new Date(dto.dateOfJoining) : null,
+        safeDto.dateOfJoining ? new Date(safeDto.dateOfJoining) : null,
       );
     }
-    if (dto.dateOfBirth !== undefined) {
+    if (safeDto.dateOfBirth !== undefined) {
       setIfDefined(
         'dateOfBirth',
-        dto.dateOfBirth ? new Date(dto.dateOfBirth) : null,
+        safeDto.dateOfBirth ? new Date(safeDto.dateOfBirth) : null,
       );
     }
-    if (dto.dateOfExit !== undefined) {
+    if (safeDto.dateOfExit !== undefined) {
       setIfDefined(
         'dateOfExit',
-        dto.dateOfExit ? new Date(dto.dateOfExit) : null,
+        safeDto.dateOfExit ? new Date(safeDto.dateOfExit) : null,
       );
     }
 
@@ -427,7 +432,7 @@ export class EmployeesService {
     }
 
     // if employee is set as experienced, ensure related document types are available
-    if (dto.isExperienced === true) {
+    if (safeDto.isExperienced === true) {
       const mandatoryExperiencedDocs = ['Payslip', 'Experience Letter', 'Relieving Letter'];
 
       await Promise.all(

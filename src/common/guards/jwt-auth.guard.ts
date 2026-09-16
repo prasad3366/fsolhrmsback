@@ -52,6 +52,21 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
         throw new UnauthorizedException('User not found or inactive');
       }
 
+      if (user.employee && user.employee.status !== 'ACTIVE') {
+        throw new UnauthorizedException('Employee is inactive');
+      }
+
+      const tokenUserUpdatedAt = payload.userUpdatedAt;
+      const currentUserUpdatedAt = user.updatedAt ? new Date(user.updatedAt).getTime() : null;
+
+      if (tokenUserUpdatedAt === undefined || tokenUserUpdatedAt === null || currentUserUpdatedAt === null) {
+        throw new UnauthorizedException('Token invalidated');
+      }
+
+      if (Number(tokenUserUpdatedAt) !== currentUserUpdatedAt) {
+        throw new UnauthorizedException('Token invalidated after password change');
+      }
+
       request.user = {
         id: user.id,
         role: user.role,

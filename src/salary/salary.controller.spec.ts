@@ -14,8 +14,8 @@ describe('SalaryController employee lookup', () => {
     controller = new SalaryController(salaryService, prisma);
     jest.spyOn((controller as any).authorizationService, 'canAccessOrganizationWide')
       .mockReturnValue(true);
-    salaryService.getLatestEmployeeSalary.mockResolvedValue({ id: 10, employeeId: 7 });
-    salaryService.assignSalary.mockResolvedValue({ id: 10, employeeId: 7 });
+    (salaryService.getLatestEmployeeSalary as jest.Mock).mockResolvedValue({ id: 10, employeeId: 7 });
+    (salaryService.assignSalary as jest.Mock).mockResolvedValue({ id: 10, employeeId: 7 });
   });
 
   it('normalizes employeeId before assigning salary', async () => {

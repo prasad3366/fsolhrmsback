@@ -63,6 +63,7 @@ export class EmployeesController {
     'FINANCE_MANAGER',
     'IT_MANAGER',
     'SALES_MANAGER',
+    'EMPLOYEE',
   )
   getAllEmployees(@Req() req, @Query() query: EmployeeDirectoryQueryDto) {
     return this.employeesService.getAllEmployees(req.user, query);

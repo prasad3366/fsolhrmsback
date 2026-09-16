@@ -9,7 +9,8 @@ const actor = (role: string, employeeId = 10) => ({
 
 describe('Leave master authorization and status rules', () => {
   const canAccessEmployee = jest.fn();
-  const authorization = { canAccessEmployee } as any;
+  const canApproveOrRejectRequest = jest.fn();
+  const authorization = { canAccessEmployee, canApproveOrRejectRequest } as any;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -41,6 +42,7 @@ describe('Leave master authorization and status rules', () => {
         }),
       },
     };
+    canApproveOrRejectRequest.mockResolvedValue(expected);
 
     await expect(
       (serviceForAuthorization() as any).canManageTargetLeave(tx, 77, 10, role),
@@ -58,11 +60,12 @@ describe('Leave master authorization and status rules', () => {
       },
     };
     canAccessEmployee.mockResolvedValue(false);
+    canApproveOrRejectRequest.mockResolvedValue(false);
 
     await expect(
       (serviceForAuthorization() as any).canManageTargetLeave(tx, 77, 999, 'SALES_MANAGER'),
     ).resolves.toBe(false);
-    expect(canAccessEmployee).toHaveBeenCalledWith(
+    expect(canApproveOrRejectRequest).toHaveBeenCalledWith(
       actor('SALES_MANAGER', 999),
       77,
     );
@@ -73,6 +76,7 @@ describe('Leave master authorization and status rules', () => {
       leave: { findUnique: jest.fn().mockResolvedValue({ id: 1, employeeId: 77, status }) },
       employee: { findUnique: jest.fn() },
     };
+    canApproveOrRejectRequest.mockResolvedValue(true);
     const prisma = { $transaction: jest.fn((callback: any) => callback(tx)) };
     const service = new LeaveService(prisma as any, {} as any, authorization);
 

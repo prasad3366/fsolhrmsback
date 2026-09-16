@@ -1,0 +1,169 @@
+HRMS NOTIFICATION + ACTION CENTER ARCHITECTURE REPORT
+====================================================
+
+A. Existing notification-related schema/models
+---------------------------------------------
+
+1. Prisma schema contains a singleton notification settings table:
+   - model NotificationSetting
+   - fields:
+     - id
+     - notifyLeaveRequest
+     - notifyLeaveApproval
+     - notifyLateAttendance
+     - notifyAnniversaries
+     - notifyNewJoiner
+     - emailChannelEnabled
+     - inAppChannelEnabled
+     - updatedAt
+
+2. This is configuration-only and not a delivery queue or notification history table.
+3. No central Notification model exists.
+4. No ActionItem / ApprovalItem / Task model exists.
+5. No notification enum exists for type/category.
+6. No per-user notification read/unread model exists.
+7. The closest read-tracking structure is for announcements:
+   - model Announcement
+   - model AnnouncementRead
+   - AnnouncementRead includes:
+     - announcementId
+     - employeeId
+     - readAt
+   - unique on [announcementId, employeeId]
+   - This is used for announcement visibility/read state, not general notification delivery.
+8. User and Employee relations are not linked to a notification table or central action model.
+9. ApprovalWorkflow exists as configuration and not as actionable approval items.
+
+B. Existing backend notification infrastructure
+----------------------------------------------
+
+1. No dedicated NotificationModule, NotificationService, or NotificationController exists.
+2. No central notification creation/delivery API exists.
+3. No event emitter / event bus is wired in the backend source.
+4. No NestJS WebSocket gateway or Socket.IO implementation is present in application source.
+5. The only backend notification-related config is:
+   - src/modules/settings/settings.service.ts
+     - getNotifications()
+     - updateNotifications()
+   - src/modules/settings/settings.controller.ts
+     - GET /settings/notifications
+     - PATCH /settings/notifications
+6. The backend has announcement read flow under:
+   - src/modules/announcement/announcement.service.ts
+   - createAnnouncement()
+   - getAnnouncements()
+   - markAsRead()
+7. This is broadcast/read tracking for announcements, not a general in-app notification engine.
+8. The email infrastructure is present only as generic mail transport:
+   - src/mail/mail.service.ts
+   - used for OTP and employee credential emails
+   - not connected to a central notification abstraction
+9. Leave/WFH/Helpdesk modules do not emit or send notifications.
+10. No reusable central method exists that creates a notification and delivers it to a target user/role.
+
+C. Existing frontend notification infrastructure
+-----------------------------------------------
+
+1. Frontend includes a local client-side notification context:
+   - src/context/NotificationContext.tsx
+   - Notification interface fields include:
+     - id
+     - type
+     - title
+     - message
+     - timestamp
+     - read
+     - link
+     - recipientRoles
+     - recipientIds
+2. It provides:
+   - addNotification
+   - markAsRead
+   - markAllAsRead
+   - clearNotifications
+   - removeNotification
+   - getFilteredNotifications
+3. This is not server-backed and is purely local UI state.
+4. App wraps the app with NotificationProvider in:
+   - src/App.tsx
+5. No actual call sites were found that consume this context in daily app flows.
+6. There is no notification bell/dropdown/action-center UI in the layout shell.
+7. Topbar contains no notification trigger:
+   - src/components/layout/Topbar.tsx
+8. No notification API/service/hook exists for fetching real notifications from backend.
+9. The announcement feature is implemented separately:
+   - src/pages/AnnouncementsPage.tsx
+   - src/services/api.ts
+10. This is a direct announcement management page, not a central notification center.
+
+D. Existing Leave/WFH/Helpdesk notification behavior
+----------------------------------------------------
+
+1. Leave:
+   - src/leave/leave.service.ts performs leave creation and approval decisions.
+   - It updates leave status and balances only.
+   - It does not emit notifications, send email, create action items, or trigger socket events.
+   - No notification infrastructure is wired into the leave flow.
+
+2. WFH:
+   - src/wfh/wfh.service.ts handles request/create/approve/reject transitions.
+   - No notifications are created or sent.
+   - No action item feeds are generated.
+
+3. Helpdesk:
+   - src/helpdesk/helpdesk.service.ts handles ticket create/approve/resolve transitions.
+   - No notifications or actionable item generation exists.
+
+4. Conclusion: Leave, WFH, and Helpdesk do not currently create or send notifications.
+
+E. What can be reused
+--------------------
+
+1. Reuse NotificationSetting as the notification configuration source.
+2. Reuse the announcement read pattern as a reference for read/unread semantics.
+3. Reuse MailService as the email delivery adapter.
+4. Reuse NotificationContext shape as a starting contract for the new centralized notification store.
+5. Reuse the architecture separation already present in domain services:
+   - Domain service owns business decisions.
+   - AuthorizationService determines who is allowed to act.
+   - Central notification/action infrastructure should handle delivery, read/unread tracking, and actionable items.
+   - Consumers must not recreate domain business rules.
+
+F. Smallest set of files that would need changes to establish a central Notification + Action Center architecture
+---------------------------------------------------------------------------------------------------------------
+
+1. prisma/schema.prisma
+   - Add central Notification and ActionItem/approval-task models
+   - Add read/unread state and user/employee linkage
+   - Keep the existing NotificationSetting config as the control-plane toggle source
+
+2. src/app.module.ts
+   - Register the central Notification module / provider / gateway
+
+3. src/modules/settings/settings.service.ts
+   - Retain and extend notification preferences as the admin/config layer
+
+4. src/modules/settings/settings.controller.ts
+   - Expose notification settings endpoints if needed by the central architecture
+
+5. src/mail/mail.service.ts
+   - Keep as email channel adapter for central notification delivery
+
+6. src/context/NotificationContext.tsx
+   - Replace the temporary local state with an API-backed central notification store
+
+7. src/components/layout/Topbar.tsx
+   - Add the central notification bell and action-center trigger
+
+8. src/services/api.ts
+   - Add APIs for notifications and action center data
+
+Architectural rule to preserve
+------------------------------
+
+Domain services own business decisions.
+AuthorizationService determines who is allowed to act.
+Central notification/action infrastructure handles delivery, read/unread and actionable items.
+Consumers must not recreate domain business rules.
+
+This means Leave, WFH, Helpdesk, and any other domain module should not directly decide who should be notified or what counts as an approval action. They should call a central service after business decisions and authorization checks are completed.

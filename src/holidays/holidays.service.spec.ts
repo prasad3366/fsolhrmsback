@@ -111,6 +111,29 @@ describe('HolidaysService business dates', () => {
     });
   });
 
+  it.each(['HR', 'CEO', 'SUPER_ADMIN'])(
+    'does not exclude the holiday creator: %s receives the same organization holiday',
+    async (_creatorRole) => {
+      const holiday = {
+        id: 1,
+        name: 'Organization Day',
+        date: new Date(2026, 8, 4),
+        location: 'Mumbai',
+      };
+      prisma.holiday.create.mockResolvedValue(holiday);
+      prisma.holiday.findFirst.mockResolvedValue(holiday);
+
+      await expect(
+        service.createHoliday({
+          name: holiday.name,
+          date: '2026-09-04',
+          location: holiday.location,
+        }),
+      ).resolves.toBe(holiday);
+      await expect(service.isHoliday(holiday.date)).resolves.toBe(holiday);
+    },
+  );
+
   it('returns NotFoundException when getting a missing Holiday', async () => {
     prisma.holiday.findUnique.mockResolvedValue(null);
 

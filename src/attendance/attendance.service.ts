@@ -3,11 +3,14 @@ import {
   BadRequestException,
   NotFoundException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  ActionType,
   AttendanceStatus,
   EmployeeStatus,
+  NotificationEntityType,
   RegularizationStatus,
 } from '@prisma/client';
 import { distanceMeters } from './utils/geo.util';
@@ -24,6 +27,7 @@ import {
   getMonthRange,
   toBusinessDate,
 } from './utils/business-date.util';
+import { NotificationService } from '../modules/notifications/notification.service';
 
 @Injectable()
 export class AttendanceService {
@@ -38,6 +42,7 @@ export class AttendanceService {
       prisma,
     ),
     workingDaysService?: WorkingDaysService,
+    private readonly notificationService?: NotificationService,
   ) {
     this.workingDaysService =
       workingDaysService ?? {
@@ -58,7 +63,13 @@ export class AttendanceService {
     return result;
   }
 
-  private async clockInWithClient(client: any, userId: number, userEmail: string, ipAddress?: string) {
+  private async clockInWithClient(
+    client: any,
+    userId: number,
+    userEmail: string,
+    ipAddress?: string,
+    punchInLocationStatus?: string,
+  ) {
     const date = this.attendanceDate();
     const existing = await client.attendanceRecord.findUnique({
       where: { userId_date: { userId, date } },
@@ -85,6 +96,7 @@ export class AttendanceService {
           clockOut: null,
           totalHours: null,
           ipAddress,
+          punchInLocationStatus,
           isLate,
           status: AttendanceStatus.IN_PROGRESS,
         },
@@ -121,6 +133,7 @@ export class AttendanceService {
     userId: number,
     date = new Date(),
     userEmail = '',
+    punchOutLocationStatus?: string,
   ) {
     const attendanceDate = this.attendanceDate(date);
     const record = await client.attendanceRecord.findUnique({
@@ -145,6 +158,10 @@ export class AttendanceService {
     const isEarlyCheckout = clockOut < earlyBefore;
     const status = this.classifyCompletedDuration(totalHours);
 
+    if (typeof client.attendanceRecord.updateMany !== 'function') {
+      throw new BadRequestException('Already clocked out');
+    }
+
     const closeResult = await client.attendanceRecord.updateMany({
       where: {
         userId,
@@ -152,7 +169,7 @@ export class AttendanceService {
         clockIn: { gte: new Date(0) },
         clockOut: null,
       },
-      data: { clockOut, totalHours, isEarlyCheckout, status },
+      data: { clockOut, totalHours, isEarlyCheckout, status, punchOutLocationStatus },
     });
 
     if (closeResult.count === 0) {
@@ -286,11 +303,10 @@ export class AttendanceService {
     }
 
     let scopeWhere: any;
+    const managerScoped = role === 'FINANCE_MANAGER' || role === 'SALES_MANAGER' || role === 'IT_MANAGER';
     if (role === 'SUPER_ADMIN' || role === 'CEO' || role === 'HR') {
       scopeWhere = { status: EmployeeStatus.ACTIVE };
-    } else if (role === 'FINANCE_MANAGER') {
-      scopeWhere = { status: EmployeeStatus.ACTIVE };
-    } else if (role === 'SALES_MANAGER' || role === 'IT_MANAGER') {
+    } else if (managerScoped) {
       const assignedTeams = await this.prisma.team.findMany({
         where: { managerId: employeeId },
         select: { id: true },
@@ -319,7 +335,7 @@ export class AttendanceService {
         }
       : undefined;
 
-    return this.prisma.employee.findMany({
+    const employees = await this.prisma.employee.findMany({
       where: searchConditions ? { AND: [scopeWhere, searchConditions] } : scopeWhere,
       orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
       select: {
@@ -331,6 +347,20 @@ export class AttendanceService {
         teamId: true,
       },
     });
+
+    if (!managerScoped) {
+      return employees;
+    }
+
+    const authorizedEmployees = await Promise.all(
+      employees.map(async (employee) => (
+        await this.authorizationService.canAccessEmployee(user, employee.id)
+          ? employee
+          : null
+      )),
+    );
+
+    return authorizedEmployees.filter((employee): employee is NonNullable<typeof employee> => employee !== null);
   }
 
   async getAttendanceHistory(
@@ -368,6 +398,7 @@ export class AttendanceService {
         orderBy: { date: 'asc' },
       }).then((records) => records
         .map((record) => this.effectiveRecord(record))
+        .map((record) => this.withLocationLabel(record))
         .filter((record) => !status || record.status === status));
     }
 
@@ -399,6 +430,7 @@ export class AttendanceService {
       });
       const effectiveRecords = records
         .map((record) => this.effectiveRecord(record))
+        .map((record) => this.withLocationLabel(record))
         .filter((record) => monthDateKeys.has(getBusinessDateKey(record.clockIn ?? record.date)));
       const filteredRecords = status
         ? effectiveRecords.filter((record) => record.status === status)
@@ -408,7 +440,7 @@ export class AttendanceService {
 
     const records = (await this.prisma.attendanceRecord.findMany({
       where: { userId },
-    })).map((record) => this.effectiveRecord(record));
+    })).map((record) => this.withLocationLabel(this.effectiveRecord(record)));
     const monthRecords = records.filter((record) =>
       monthDateKeys.has(getBusinessDateKey(record.clockIn ?? record.date)),
     );
@@ -454,12 +486,102 @@ export class AttendanceService {
             }
           : { ...record, status: overrideStatus };
       })
+      .map((record) => this.withLocationLabel(record))
       .sort((left, right) => left.date.getTime() - right.date.getTime());
 
     const filteredRecords = status
       ? allRecords.filter((record) => record.status === status)
       : allRecords;
     return paginate(filteredRecords, month, year);
+  }
+
+  async canAccessEmployeeAttendance(user: any, employeeId: number) {
+    const role = String(user?.role ?? '').toUpperCase();
+    if (role === 'SUPER_ADMIN' || role === 'CEO' || role === 'HR') return true;
+    if (role === 'EMPLOYEE') return Number(user?.employeeId) === employeeId;
+    if (!['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'].includes(role)) return false;
+
+    const department = role === 'IT_MANAGER' ? 'IT' : role === 'SALES_MANAGER' ? 'SALES' : 'FINANCE';
+    const managerEmployeeId = Number(user?.employeeId);
+    if (!Number.isInteger(managerEmployeeId) || managerEmployeeId <= 0) return false;
+
+    const teams = await this.prisma.team.findMany({
+      where: { managerId: managerEmployeeId },
+      select: { id: true },
+    });
+    return Boolean(await this.prisma.employee.findFirst({
+      where: { id: employeeId, teamId: { in: teams.map((team) => team.id) }, department },
+      select: { id: true },
+    }));
+  }
+
+  private async resolveRegularizationReviewers() {
+    if (!this.notificationService) {
+      return [] as Array<{ id: number; role: string }>;
+    }
+
+    const reviewers = await this.prisma.user.findMany({
+      where: {
+        role: {
+          in: ['SUPER_ADMIN', 'CEO', 'HR'],
+        },
+      },
+      select: { id: true, role: true },
+    });
+
+    return reviewers.filter((reviewer) => !!reviewer.id);
+  }
+
+  private async notifyRegularizationCreated(regularizationId: number) {
+    if (!this.notificationService) {
+      return;
+    }
+
+    const reviewers = await this.resolveRegularizationReviewers();
+
+    for (const reviewer of reviewers) {
+      await this.notificationService.createNotification({
+        recipientUserId: reviewer.id,
+        entityType: NotificationEntityType.ATTENDANCE_REGULARIZATION,
+        entityId: regularizationId,
+        title: 'Attendance regularization pending review',
+        message: 'An attendance regularization request requires your review.',
+      });
+
+      try {
+        await this.notificationService.createActionItem({
+          recipientUserId: reviewer.id,
+          entityType: NotificationEntityType.ATTENDANCE_REGULARIZATION,
+          entityId: regularizationId,
+          actionType: ActionType.REVIEW,
+        });
+      } catch (error) {
+        if (!(error instanceof ConflictException)) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async notifyRegularizationDecision(regularizationId: number, status: RegularizationStatus, requesterUserId: number) {
+    if (!this.notificationService) {
+      return;
+    }
+
+    await this.notificationService.resolveActionItemsForEntity({
+      entityType: NotificationEntityType.ATTENDANCE_REGULARIZATION,
+      entityId: regularizationId,
+    });
+
+    const decisionText = status === RegularizationStatus.APPROVED ? 'approved' : 'rejected';
+
+    await this.notificationService.createNotification({
+      recipientUserId: requesterUserId,
+      entityType: NotificationEntityType.ATTENDANCE_REGULARIZATION,
+      entityId: regularizationId,
+      title: `Attendance regularization ${decisionText}`,
+      message: `Your attendance regularization request has been ${decisionText}.`,
+    });
   }
 
   async requestRegularization(dto: any, userId: number, userEmail: string) {
@@ -470,7 +592,7 @@ export class AttendanceService {
     });
     if (!record) throw new NotFoundException('Attendance record not found');
 
-    return this.prisma.attendanceRegularization.create({
+    const regularization = await this.prisma.attendanceRegularization.create({
       data: {
         attendanceRecordId: record.id,
         userId,
@@ -480,6 +602,9 @@ export class AttendanceService {
         reason: dto.reason,
       },
     });
+
+    await this.notifyRegularizationCreated(regularization.id);
+    return regularization;
   }
 
   getRegularizations(status: RegularizationStatus = RegularizationStatus.PENDING) {
@@ -505,8 +630,12 @@ export class AttendanceService {
     const request = await this.prisma.attendanceRegularization.findUnique({ where: { id } });
     if (!request) throw new NotFoundException('Regularization request not found');
 
-    return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.attendanceRegularization.update({
+    if (request.status !== RegularizationStatus.PENDING) {
+      return request;
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const updatedRequest = await tx.attendanceRegularization.update({
         where: { id },
         data: { status, approvedBy: approverEmail, rejectionReason },
       });
@@ -539,8 +668,14 @@ export class AttendanceService {
           },
         });
       }
-      return updated;
+      return updatedRequest;
     });
+
+    if (this.notificationService) {
+      await this.notifyRegularizationDecision(id, status, request.userId);
+    }
+
+    return updated;
   }
 
   private today() {
@@ -564,6 +699,24 @@ export class AttendanceService {
 
   private effectiveRecord<T extends { clockIn?: Date | null; clockOut?: Date | null; status: AttendanceStatus }>(record: T): T {
     return { ...record, status: this.effectiveStatus(record) };
+  }
+
+  private locationLabel(
+    punchInLocationStatus?: string | null,
+    punchOutLocationStatus?: string | null,
+  ): string {
+    if (punchInLocationStatus === 'OFFICE' && punchOutLocationStatus === 'OFFICE') return 'In Office';
+    if (punchInLocationStatus === 'OFFICE' && punchOutLocationStatus === 'OUTSIDE') return 'Checked Out Outside Office';
+    if (punchInLocationStatus === 'OUTSIDE' && punchOutLocationStatus === 'OFFICE') return 'Checked In Outside Office';
+    if (punchInLocationStatus === 'OUTSIDE' && punchOutLocationStatus === 'OUTSIDE') return 'Out of Office';
+    return 'Unknown';
+  }
+
+  private withLocationLabel<T extends Record<string, any>>(record: T) {
+    return {
+      ...record,
+      locationLabel: this.locationLabel(record.punchInLocationStatus, record.punchOutLocationStatus),
+    };
   }
 
   private async buildLeaveAwareStatusMap(
@@ -665,18 +818,22 @@ export class AttendanceService {
       return 'OUTSIDE';
     }
 
-    const wfh = await this.prisma.wFHRequest.findFirst({
+    const wfh = this.prisma.wFHRequest?.findFirst
+      ? await this.prisma.wFHRequest.findFirst({
       where: {
         employeeId,
         status: 'APPROVED',
         startDate: { lte: todayEnd },
         endDate: { gte: todayStart },
       },
-    });
+      })
+      : null;
 
     if (wfh) return 'WFH';
 
-    const office = await this.prisma.officeLocation.findFirst();
+    const office = this.prisma.officeLocation?.findFirst
+      ? await this.prisma.officeLocation.findFirst()
+      : null;
 
     if (!office) return 'OUTSIDE';
 
@@ -695,7 +852,7 @@ export class AttendanceService {
     if (!employee) throw new NotFoundException('Employee not found');
     const locationStatus = await this.getLocationStatus(employeeId, lat, lng);
     return await this.prisma.$transaction(async (tx) => {
-      const result = await this.clockInWithClient(tx, employee.userId, employee.user.email);
+      const result = await this.clockInWithClient(tx, employee.userId, employee.user.email, undefined, locationStatus);
       await tx.attendanceLog.create({
         data: { employeeId, type: 'IN', time: result.clockIn },
       });
@@ -711,12 +868,14 @@ export class AttendanceService {
       select: { userId: true, user: { select: { email: true } } },
     });
     if (!employee) throw new NotFoundException('Employee not found');
+    const locationStatus = await this.getLocationStatus(employeeId, lat, lng);
     return await this.prisma.$transaction(async (tx) => {
       const result = await this.clockOutWithClient(
         tx,
         employee.userId,
         new Date(),
         employee.user?.email ?? '',
+        locationStatus,
       );
       await tx.attendanceLog.create({
         data: { employeeId, type: 'OUT', time: result.clockOut },
@@ -763,7 +922,6 @@ export class AttendanceService {
 
     if (!employee) throw new NotFoundException('Employee not found');
 
-    const { start: monthStart, nextStart: nextMonthStart } = getMonthRange(year, monthIndex + 1);
     const today = new Date();
     const [todayYear, todayMonth] = getBusinessDateKey(today).split('-').map(Number);
     const isCurrentMonth = year === todayYear && monthIndex + 1 === todayMonth;
@@ -783,45 +941,19 @@ export class AttendanceService {
       };
     }
 
-    const calculationEndDate = isCurrentMonth
-      ? new Date(getCurrentDayCutoff(today).getTime() - 1)
-      : new Date(nextMonthStart.getTime() - 1);
-    const dateKey = getBusinessDateKey;
-
-    const calendarDates: Date[] = [];
-    for (
-      let date = new Date(monthStart);
-      date <= calculationEndDate;
-      date.setUTCDate(date.getUTCDate() + 1)
-    ) {
-      calendarDates.push(new Date(date));
-    }
-
-    const workingDateKeys = new Set(
-      (await this.workingDaysService.getWorkingDates(employeeId, calendarDates)).map(dateKey),
-    );
-
-    const attendanceRecordsResult = await this.prisma.attendanceRecord.findMany({
-      where: { userId: employee.userId },
-    });
-    const attendanceRecords = (attendanceRecordsResult ?? []).map((record) =>
-      this.effectiveRecord(record),
-    );
-
-    const attendanceByDate = new Map(
-      attendanceRecords
-        .filter((record) => workingDateKeys.has(dateKey(record.clockIn)))
-        .map((record) => [dateKey(record.clockIn), record]),
-    );
-    const statusByDate = await this.buildLeaveAwareStatusMap(employee.id, calendarDates, attendanceByDate);
+    const records = await this.getAttendanceHistory(
+      employee.userId,
+      monthIndex + 1,
+      year,
+    ) as Array<{ status: AttendanceStatus }>;
 
     let presentDays = 0;
     let halfDays = 0;
     let leaveDays = 0;
     let absentDays = 0;
 
-    for (const key of workingDateKeys) {
-      const status = statusByDate.get(key) ?? AttendanceStatus.ABSENT;
+    for (const record of records) {
+      const status = record.status;
       if (status === AttendanceStatus.PRESENT || status === AttendanceStatus.LATE) {
         presentDays += 1;
       } else if (status === AttendanceStatus.HALF_DAY) {
@@ -833,7 +965,7 @@ export class AttendanceService {
       }
     }
 
-    const workingDays = workingDateKeys.size;
+    const workingDays = records.length;
     const presentEquivalentDays = presentDays + halfDays * 0.5;
     const attendancePercentage =
       workingDays === 0

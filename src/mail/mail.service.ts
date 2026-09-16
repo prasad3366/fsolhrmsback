@@ -1,5 +1,6 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
+import { existsSync } from 'fs';
 import { join } from 'path';
 
 @Injectable()
@@ -23,13 +24,24 @@ export class MailService {
       .catch((err) => console.error('❌ SMTP Connection Error:', err));
   }
 
+  private logoPath() {
+    const candidates = [
+      join(process.cwd(), 'src', 'public', 'foodeezlogo1.jpeg'),
+      join(__dirname, '../public/foodeezlogo1.jpeg'),
+      join(__dirname, '../../../src/public/foodeezlogo1.jpeg'),
+    ];
+    const logoPath = candidates.find((candidate) => existsSync(candidate));
+    if (!logoPath) throw new Error('Credential email logo asset not found');
+    return logoPath;
+  }
+
   // ✅ Send Employee Credentials
   async sendEmployeeCredentials(to: string, password: string, firstName: string) {
     try {
       console.log('📧 Sending credentials to:', to);
 
       const logoCid = 'foodeezlogo1@logo';
-      const logoPath = join(process.cwd(), 'src', 'public', 'foodeezlogo1.jpeg');
+      const logoPath = this.logoPath();
 
 const info = await this.transporter.sendMail({
   from: process.env.SMTP_EMAIL,
@@ -107,7 +119,7 @@ const info = await this.transporter.sendMail({
       console.log('📧 Sending OTP to:', to);
 
       const logoCid = 'foodeezlogo1@logo';
-      const logoPath = join(process.cwd(), 'src', 'public', 'foodeezlogo1.jpeg');
+      const logoPath = this.logoPath();
 
       const info = await this.transporter.sendMail({
         from: process.env.SMTP_EMAIL,

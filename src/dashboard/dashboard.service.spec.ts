@@ -184,14 +184,14 @@ describe('DashboardService attendance export authorization', () => {
 
   it('uses the canonical completed-duration thresholds for Dashboard attendance', async () => {
     const { service } = createCalculationService(null, [], [
-      { employeeId: 7, date: new Date(2026, 7, 3), status: 'PRESENT', clockIn: new Date(2026, 7, 3, 9), clockOut: new Date(2026, 7, 3, 16) },
+      { employeeId: 7, date: new Date(2026, 7, 3), status: 'LATE', clockIn: new Date(2026, 7, 3, 9), clockOut: new Date(2026, 7, 3, 16) },
       { employeeId: 7, date: new Date(2026, 7, 4), status: 'HALF_DAY', clockIn: new Date(2026, 7, 4, 9), clockOut: new Date(2026, 7, 4, 13) },
       { employeeId: 7, date: new Date(2026, 7, 5), status: 'ABSENT', clockIn: new Date(2026, 7, 5, 9), clockOut: new Date(2026, 7, 5, 12) },
     ]);
 
     const csv = await service.exportAttendanceCsv(8, 2026, { role: 'HR', employeeId: 10 });
 
-    expect(csv).toContain('E7,Test Employee,21,1.5,0');
+    expect(csv).toContain('E7,Test Employee,21,1,1,19,0');
   });
 
   it('counts approved leave as leave and ignores pending/rejected/cancelled leave', async () => {
@@ -204,7 +204,7 @@ describe('DashboardService attendance export authorization', () => {
 
     const csv = await service.exportAttendanceCsv(8, 2026, { role: 'HR', employeeId: 10 });
 
-    expect(csv).toContain('E7,Test Employee,26,0,1');
+    expect(csv).toContain('E7,Test Employee,26,0,0,25,1');
   });
 
   it('counts approved leave using the shared eligible working-day definition', async () => {
@@ -218,6 +218,19 @@ describe('DashboardService attendance export authorization', () => {
 
     const csv = await service.exportAttendanceCsv(8, 2026, { role: 'HR', employeeId: 10 });
 
-    expect(csv).toContain('E7,Test Employee,26,0,2');
+    expect(csv).toContain('E7,Test Employee,26,0,0,24,2');
+  });
+
+  it('keeps the Dashboard attendance breakdown reconcilable', async () => {
+    const { service } = createCalculationService(null, [], [
+      { employeeId: 7, date: new Date(2026, 7, 3), status: 'PRESENT', clockIn: new Date(2026, 7, 3, 9), clockOut: new Date(2026, 7, 3, 17) },
+      { employeeId: 7, date: new Date(2026, 7, 4), status: 'HALF_DAY', clockIn: new Date(2026, 7, 4, 9), clockOut: new Date(2026, 7, 4, 13) },
+      { employeeId: 7, date: new Date(2026, 7, 5), status: 'ABSENT', clockIn: null, clockOut: null },
+    ]);
+
+    const [, row] = (await service.exportAttendanceCsv(8, 2026, { role: 'HR', employeeId: 10 })).split('\n');
+    const [, , workingDays, presentDays, halfDays, absentDays, leaveDays] = row.split(',').map(Number);
+
+    expect(workingDays).toBe(Number(presentDays) + Number(halfDays) + Number(absentDays) + Number(leaveDays));
   });
 });

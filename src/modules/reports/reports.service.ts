@@ -12,6 +12,8 @@ import {
   AuthorizationUser,
 } from '../../common/authorization/authorization.service';
 import { WorkingDaysService } from '../../common/working-days/working-days.service';
+import { HolidaysService } from '../../holidays/holidays.service';
+import { AttendanceService } from '../../attendance/attendance.service';
 import { MonthlyAttendanceReportQueryDto } from './dto/monthly-attendance-report-query.dto';
 
 interface DateRange {
@@ -25,6 +27,12 @@ export class ReportsService {
     private readonly prisma: PrismaService,
     private readonly authorizationService: AuthorizationService,
     private readonly workingDaysService: WorkingDaysService,
+    private readonly attendanceService: AttendanceService = new AttendanceService(
+      prisma,
+      new HolidaysService(prisma),
+      authorizationService,
+      workingDaysService,
+    ),
   ) {}
 
   private async getReportScope(user: AuthorizationUser | undefined) {
@@ -91,12 +99,10 @@ export class ReportsService {
 
   async getExecutiveSummary(user: AuthorizationUser) {
     const scope = await this.getReportScope(user);
-    const { start, end } = this.getTodayRange();
 
     const [
       totalEmployees,
       activeEmployees,
-      todayPresent,
       openJobs,
       activeTraining,
       totalEnrollments,
@@ -105,13 +111,6 @@ export class ReportsService {
     ] = await Promise.all([
       this.prisma.employee.count({ where: scope.employeeWhere }),
       this.prisma.employee.count({ where: { ...scope.employeeWhere, status: EmployeeStatus.ACTIVE } }),
-      this.prisma.attendanceRecord.count({
-        where: {
-          date: { gte: start, lte: end },
-          status: { in: [AttendanceStatus.PRESENT, 'LATE'] },
-          user: { employee: scope.attendanceEmployeeWhere },
-        },
-      }),
       this.prisma.jobPosting.count({ where: { ...scope.jobWhere, status: JobStatus.OPEN } }),
       this.prisma.trainingProgram.count({
         where: {
@@ -125,10 +124,21 @@ export class ReportsService {
       }),
       this.prisma.employee.findMany({
         where: scope.employeeWhere,
-        select: { department: true },
+        select: { id: true, userId: true, department: true },
         orderBy: { department: 'asc' },
       }),
     ]);
+
+    const todayStatuses = await Promise.all(
+      employees.map((employee) =>
+        this.attendanceService.getTodayStatus(employee.userId, employee.id),
+      ),
+    );
+    const todayPresent = todayStatuses.filter(
+      (result) =>
+        result.status === AttendanceStatus.PRESENT ||
+        result.status === AttendanceStatus.LATE,
+    ).length;
 
     const departmentCounts = new Map<string, number>();
     for (const employee of employees) {
@@ -185,34 +195,17 @@ export class ReportsService {
   async getAttendanceReportData(startDate?: string, endDate?: string, user?: AuthorizationUser) {
     const scope = await this.getReportScope(user);
     const range = this.parseDateRange(startDate, endDate);
-    const attendance = await this.prisma.attendanceRecord.findMany({
-      where: {
-        date: {
-          ...(range.startDate && { gte: range.startDate }),
-          ...(range.endDate && { lte: range.endDate }),
-        },
-        user: { employee: { ...scope.attendanceEmployeeWhere, status: EmployeeStatus.ACTIVE } },
-      },
+    const employees = await this.prisma.employee.findMany({
+      where: { ...scope.attendanceEmployeeWhere, status: EmployeeStatus.ACTIVE },
       select: {
-        date: true,
-        status: true,
-        clockIn: true,
-        clockOut: true,
-        user: {
-          select: {
-            employee: {
-              select: {
-                id: true,
-                empCode: true,
-                firstName: true,
-                lastName: true,
-                department: true,
-              },
-            },
-          },
-        },
+        id: true,
+        userId: true,
+        empCode: true,
+        firstName: true,
+        lastName: true,
+        department: true,
       },
-      orderBy: [{ userId: 'asc' }, { date: 'asc' }],
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
     });
 
     const rows = new Map<number, {
@@ -225,9 +218,17 @@ export class ReportsService {
       lateArrivals: number;
     }>();
 
-    for (const record of attendance) {
-      const employee = record.user.employee;
-      if (!employee) continue;
+    for (const employee of employees) {
+      const historyResult = await this.attendanceService.getAttendanceHistory(employee.userId);
+      const history = Array.isArray(historyResult) ? historyResult : historyResult.data;
+      const relevantRecords = history.filter((record) => {
+        const recordDate = record.date ?? record.clockIn ?? record.clockOut;
+        if (!recordDate) return false;
+        if (range.startDate && new Date(recordDate) < range.startDate) return false;
+        if (range.endDate && new Date(recordDate) > range.endDate) return false;
+        return true;
+      });
+
       const row = rows.get(employee.id) ?? {
         employeeId: employee.id,
         empCode: employee.empCode,
@@ -238,16 +239,21 @@ export class ReportsService {
         lateArrivals: 0,
       };
 
-      const completedHours = this.getCompletedHours(record);
-      const contribution = this.getAttendanceContribution(record, completedHours);
-      if (contribution === 1) {
-        row.totalPresentDays += 1;
-      } else if (record.status === AttendanceStatus.ABSENT && record.clockIn && record.clockOut) {
-        row.totalAbsentDays += 1;
+      for (const record of relevantRecords) {
+        if (record.status === AttendanceStatus.PRESENT || record.status === AttendanceStatus.LATE) {
+          row.totalPresentDays += 1;
+        } else if (record.status === AttendanceStatus.ABSENT) {
+          row.totalAbsentDays += 1;
+        }
+        if (
+          record.clockIn &&
+          record.clockOut &&
+          (record.status === AttendanceStatus.LATE || (record.clockIn && record.clockIn.getHours() > 9))
+        ) {
+          row.lateArrivals += 1;
+        }
       }
-      if (record.clockIn && record.clockOut && (record.status === 'LATE' || this.isLateArrival(record.clockIn))) {
-        row.lateArrivals += 1;
-      }
+
       rows.set(employee.id, row);
     }
 
@@ -344,125 +350,52 @@ export class ReportsService {
     const employeeIds = summaryEmployees.map((employee) => employee.id);
     const userIds = summaryEmployees.map((employee) => employee.userId);
 
-    const [attendanceRecords, approvedLeaves] = await Promise.all([
-      userIds.length
-        ? this.prisma.attendanceRecord.findMany({
-            where: {
-              userId: { in: userIds },
-              date: { gte: monthStart, lt: calculationEnd },
-            },
-            select: { userId: true, date: true, status: true, clockIn: true, clockOut: true, totalHours: true },
-          })
-        : Promise.resolve([]),
-      employeeIds.length
-        ? this.prisma.leave.findMany({
-            where: {
-              employeeId: { in: employeeIds },
-              status: 'APPROVED',
-              startDate: { lt: calculationEnd },
-              endDate: { gte: monthStart },
-            },
-            select: {
-              employeeId: true,
-              startDate: true,
-              endDate: true,
-              durationType: true,
-              totalDays: true,
-              status: true,
-            },
-          })
-        : Promise.resolve([]),
-    ]);
-
-    const dateKey = (date: Date) =>
-      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    const calendarDates: Date[] = [];
-    for (let date = new Date(monthStart); date < calculationEnd; date.setDate(date.getDate() + 1)) {
-      calendarDates.push(new Date(date));
-    }
-
-    const scheduleRepresentatives = new Map<string, number>();
+    const attendanceByUser = new Map<number, any[]>();
     for (const employee of summaryEmployees) {
-      const schedule = employee.team?.name?.toUpperCase() === 'SALES' ? 'SALES' : 'NORMAL';
-      if (!scheduleRepresentatives.has(schedule)) scheduleRepresentatives.set(schedule, employee.id);
-    }
-    const workingDatesBySchedule = new Map<string, Set<string>>();
-    for (const [schedule, representativeId] of scheduleRepresentatives) {
-      const workingDates = await this.workingDaysService.getWorkingDates(representativeId, calendarDates);
-      workingDatesBySchedule.set(schedule, new Set(workingDates.map(dateKey)));
-    }
-
-    const recordsByUser = new Map<number, any[]>();
-    for (const record of attendanceRecords) {
-      const records = recordsByUser.get(record.userId) ?? [];
-      records.push(record);
-      recordsByUser.set(record.userId, records);
-    }
-    const leavesByEmployee = new Map<number, any[]>();
-    for (const leave of approvedLeaves) {
-      const leaves = leavesByEmployee.get(leave.employeeId) ?? [];
-      leaves.push(leave);
-      leavesByEmployee.set(leave.employeeId, leaves);
+      const monthRecordsResult = await this.attendanceService.getAttendanceHistory(employee.userId, month, year);
+      const monthRecords = Array.isArray(monthRecordsResult)
+        ? monthRecordsResult
+        : monthRecordsResult.data;
+      attendanceByUser.set(employee.userId, monthRecords);
     }
 
     const pageEmployeeDetails = new Map(pageEmployees.map((employee) => [employee.id, employee]));
     const rows = summaryEmployees.map((employee) => {
       const details = pageEmployeeDetails.get(employee.id);
-      const schedule = employee.team?.name?.toUpperCase() === 'SALES' ? 'SALES' : 'NORMAL';
-      const workingDateKeys = workingDatesBySchedule.get(schedule) ?? new Set<string>();
-      const employeeLeaves = leavesByEmployee.get(employee.id) ?? [];
-      const leaveDateKeys = new Set<string>();
-      let approvedLeaveDays = 0;
-
-      for (const leave of employeeLeaves) {
-        if (leave?.status && leave.status !== 'APPROVED') continue;
-        const overlapStart = leave.startDate > monthStart ? leave.startDate : monthStart;
-        const overlapEnd = leave.endDate < new Date(calculationEnd.getTime() - 1) ? leave.endDate : new Date(calculationEnd.getTime() - 1);
-        if (overlapStart > overlapEnd) continue;
-        const leaveDates: Date[] = [];
-        for (let date = new Date(overlapStart.getFullYear(), overlapStart.getMonth(), overlapStart.getDate()); date <= overlapEnd; date.setDate(date.getDate() + 1)) {
-          leaveDates.push(new Date(date));
-        }
-        const workingLeaveDays = leaveDates.filter((date) => workingDateKeys.has(dateKey(date)));
-        workingLeaveDays.forEach((date) => leaveDateKeys.add(dateKey(date)));
-        const leaveSpanDays = Math.floor((leave.endDate.getTime() - leave.startDate.getTime()) / 86400000) + 1;
-        approvedLeaveDays += leave.durationType === 'FULL_DAY'
-          ? workingLeaveDays.length
-          : leaveSpanDays > 0 ? leave.totalDays * (workingLeaveDays.length / leaveSpanDays) : 0;
-      }
-
-      const records = recordsByUser.get(employee.userId) ?? [];
-      const recordsByDate = new Map(records.map((record) => [dateKey(record.date), record]));
+      const records = attendanceByUser.get(employee.userId) ?? [];
       let presentDays = 0;
       let halfDays = 0;
       let absentDays = 0;
+      let approvedLeaveDays = 0;
       let lateArrivals = 0;
       const statuses = new Set<AttendanceStatus>();
 
-      for (const key of workingDateKeys) {
-        if (leaveDateKeys.has(key)) {
+      for (const record of records) {
+        const status = record.status ?? AttendanceStatus.ABSENT;
+        if (status === AttendanceStatus.LEAVE) {
+          approvedLeaveDays += 1;
           statuses.add(AttendanceStatus.LEAVE);
           continue;
         }
-        const record = recordsByDate.get(key);
-        const completedHours = this.getCompletedHours(record);
-        const contribution = this.getAttendanceContribution(record, completedHours);
-
-        if (contribution === 1) {
+        if (status === AttendanceStatus.PRESENT || status === AttendanceStatus.LATE) {
           presentDays += 1;
           statuses.add(AttendanceStatus.PRESENT);
-          if (record?.status === AttendanceStatus.LATE || (record?.clockIn && this.isLateArrival(record.clockIn))) lateArrivals += 1;
-        } else if (contribution === 0.5) {
+          if (status === AttendanceStatus.LATE || (record.clockIn && record.clockIn.getHours() > 9)) lateArrivals += 1;
+          continue;
+        }
+        if (status === AttendanceStatus.HALF_DAY) {
           halfDays += 1;
           statuses.add(AttendanceStatus.HALF_DAY);
-          if (record?.status === AttendanceStatus.LATE || (record?.clockIn && this.isLateArrival(record.clockIn))) lateArrivals += 1;
-        } else {
+          if (record.clockIn && record.clockIn.getHours() > 9) lateArrivals += 1;
+          continue;
+        }
+        if (status === AttendanceStatus.ABSENT) {
           absentDays += 1;
           statuses.add(AttendanceStatus.ABSENT);
         }
       }
 
-      const workingDays = workingDateKeys.size;
+      const workingDays = records.length;
       const presentEquivalentDays = presentDays + halfDays * 0.5;
       return {
         employeeId: employee.id,
@@ -548,30 +481,6 @@ export class ReportsService {
       else date.setHours(0, 0, 0, 0);
     }
     return date;
-  }
-
-  private getCompletedHours(record: { clockIn?: Date | null; clockOut?: Date | null; totalHours?: number | null } | undefined) {
-    if (!record || !record.clockIn || !record.clockOut) return 0;
-    if (record.totalHours != null && Number.isFinite(Number(record.totalHours))) {
-      return Number(record.totalHours);
-    }
-    return (new Date(record.clockOut).getTime() - new Date(record.clockIn).getTime()) / 3600000;
-  }
-
-  private getAttendanceContribution(
-    record: { clockIn?: Date | null; clockOut?: Date | null; totalHours?: number | null; status?: AttendanceStatus | string } | undefined,
-    completedHours: number,
-  ) {
-    if (!record || !record.clockIn || !record.clockOut) return 0;
-    if (completedHours < 4) return 0;
-    if (completedHours < 7) return 0.5;
-    return 1;
-  }
-
-  private isLateArrival(punchIn: Date) {
-    const cutoff = new Date(punchIn);
-    cutoff.setHours(9, 0, 0, 0);
-    return punchIn > cutoff;
   }
 
   private roundPercentage(value: number) {

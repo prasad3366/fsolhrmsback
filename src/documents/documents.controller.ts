@@ -5,7 +5,6 @@ import {
   Patch,
   Param,
   Body,
-  UploadedFile,
   UploadedFiles,
   UseInterceptors,
   Res,
@@ -15,13 +14,9 @@ import {
   BadRequestException,
   ForbiddenException,
   UnauthorizedException,
-  Controller as BaseController,
 } from '@nestjs/common';
-import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
-import { diskStorage, memoryStorage } from 'multer';
-import { mkdirSync } from 'fs';
-import { extname, join } from 'path';
-import { randomUUID } from 'crypto';
+import { FilesInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { DocumentsService } from './documents.service';
 import { DocumentStatus } from '@prisma/client';
 import type { Response } from 'express';
@@ -267,95 +262,5 @@ export class DocumentsController {
     });
 
     res.send(doc.fileData);
-  }
-}
-
-@BaseController('documents')
-@UseGuards(JwtAuthGuard)
-export class DocumentUploadController {
-  private readonly authorizationService: AuthorizationService;
-
-  constructor(
-    private readonly service: DocumentsService,
-    private readonly prisma: PrismaService,
-  ) {
-    this.authorizationService = new AuthorizationService(this.prisma);
-  }
-
-  private requireAuthenticatedUser(req: any) {
-    const user = req?.user;
-    if (!user || !user.role) {
-      throw new UnauthorizedException('Authentication required');
-    }
-    return user;
-  }
-
-  private hasOrgWideDocumentAccess(user: any): boolean {
-    return ['SUPER_ADMIN', 'CEO', 'HR'].includes(String(user?.role ?? '').toUpperCase());
-  }
-
-  @Post('upload')
-  @UseInterceptors(
-    FileInterceptor('file', {
-      storage: diskStorage({
-        destination: (_req, _file, callback) => {
-          const destination = join(process.cwd(), 'uploads', 'documents');
-          mkdirSync(destination, { recursive: true });
-          callback(null, destination);
-        },
-        filename: (_req, file, callback) => {
-          callback(null, `${randomUUID()}${extname(file.originalname)}`);
-        },
-      }),
-      limits: { fileSize: 5 * 1024 * 1024 },
-    }),
-  )
-  upload(
-    @UploadedFile() file: Express.Multer.File,
-    @Body() body: Record<string, string>,
-    @Req() req,
-  ) {
-    const user = this.requireAuthenticatedUser(req);
-    if (!this.hasOrgWideDocumentAccess(user)) {
-      throw new ForbiddenException('Document management access denied');
-    }
-
-    const parsedEmpId = parseInt(body?.employeeId, 10);
-    const normalizedEmployeeId = parsedEmpId;
-
-    if (!Number.isInteger(normalizedEmployeeId) || normalizedEmployeeId <= 0) {
-      throw new BadRequestException('Employee profile required');
-    }
-
-    return this.service.uploadDocument(
-      file,
-      body?.title,
-      body?.documentType,
-      normalizedEmployeeId,
-    );
-  }
-
-  @Get('employee/:employeeId')
-  async getEmployeeDocuments(@Param('employeeId') employeeId: string, @Req() req) {
-    const user = this.requireAuthenticatedUser(req);
-    const normalizedEmployeeId = Number(employeeId);
-    if (!Number.isInteger(normalizedEmployeeId) || normalizedEmployeeId <= 0) {
-      throw new BadRequestException('Invalid employee id');
-    }
-
-    if (this.hasOrgWideDocumentAccess(user)) {
-      return this.service.getEmployeeDocuments(normalizedEmployeeId);
-    }
-
-    if (String(user.role).toUpperCase() !== 'EMPLOYEE') {
-      throw new ForbiddenException('Document access denied');
-    }
-
-    const ownEmployeeId = Number(user.employeeId);
-    if (ownEmployeeId !== normalizedEmployeeId) {
-      throw new ForbiddenException('Access denied');
-    }
-
-    return this.service.getEmployeeDocuments(ownEmployeeId);
   }
 }

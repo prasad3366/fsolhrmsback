@@ -7,7 +7,7 @@ describe('HelpdeskService management authorization', () => {
   const ticketCreate = jest.fn();
   const userFindUnique = jest.fn();
   const prisma = {
-    user: { findUnique: userFindUnique },
+    user: { findUnique: userFindUnique, findMany: jest.fn().mockResolvedValue([{ id: 2, role: 'HR' }]) },
     helpdeskTicket: {
       findUnique: ticketFindUnique,
       updateMany: ticketUpdateMany,

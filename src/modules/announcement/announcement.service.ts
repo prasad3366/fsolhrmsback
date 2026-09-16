@@ -3,14 +3,18 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AnnouncementAudience, Prisma } from '@prisma/client';
+import { AnnouncementAudience, NotificationEntityType, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { NotificationService } from '../notifications/notification.service';
 import { CreateAnnouncementDto } from './dto/create-announcement.dto';
 import { UpdateAnnouncementDto } from './dto/update-announcement.dto';
 
 @Injectable()
 export class AnnouncementService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notificationService?: NotificationService,
+  ) {}
 
   private readonly globalCreateRoles = new Set(['SUPER_ADMIN', 'CEO', 'HR', 'HR_MANAGER']);
 
@@ -137,6 +141,73 @@ export class AnnouncementService {
     }
   }
 
+  private async resolveAnnouncementTargetUserIds(announcement: {
+    targetAudience: AnnouncementAudience;
+    teamId?: number | null;
+    departmentId?: string | null;
+  }): Promise<number[]> {
+    if (announcement.targetAudience === AnnouncementAudience.ALL) {
+      const users = await this.prisma.user.findMany({
+        where: { isActive: true },
+        select: { id: true },
+      });
+      return users.map((user) => user.id);
+    }
+
+    if (announcement.targetAudience === AnnouncementAudience.TEAM) {
+      if (!announcement.teamId) {
+        return [];
+      }
+
+      const employees = await this.prisma.employee.findMany({
+        where: { teamId: announcement.teamId },
+        select: { userId: true },
+      });
+      return employees
+        .map((employee) => employee.userId)
+        .filter((userId): userId is number => typeof userId === 'number');
+    }
+
+    if (announcement.targetAudience === AnnouncementAudience.DEPARTMENT) {
+      if (!announcement.departmentId) {
+        return [];
+      }
+
+      const employees = await this.prisma.employee.findMany({
+        where: { department: announcement.departmentId },
+        select: { userId: true },
+      });
+      return employees
+        .map((employee) => employee.userId)
+        .filter((userId): userId is number => typeof userId === 'number');
+    }
+
+    return [];
+  }
+
+  private async notifyAnnouncementPublished(announcement: {
+    id: number;
+    title: string;
+    targetAudience: AnnouncementAudience;
+    teamId?: number | null;
+    departmentId?: string | null;
+  }) {
+    if (!this.notificationService) {
+      return;
+    }
+
+    const recipientUserIds = await this.resolveAnnouncementTargetUserIds(announcement);
+    for (const recipientUserId of recipientUserIds) {
+      await this.notificationService.createNotification({
+        recipientUserId,
+        entityType: NotificationEntityType.ANNOUNCEMENT,
+        entityId: announcement.id,
+        title: `New announcement: ${announcement.title}`,
+        message: `A new announcement is available: ${announcement.title}.`,
+      });
+    }
+  }
+
   async createAnnouncement(
     dto: CreateAnnouncementDto,
     reqUser: { id: number; role: string; employeeId?: number | null; departmentId?: string | number | null },
@@ -146,12 +217,17 @@ export class AnnouncementService {
     const normalizedRole = this.normalizeRole(reqUser?.role);
     const isGlobal = this.globalCreateRoles.has(normalizedRole);
     const employeeContext = await this.resolveEmployeeContext(reqUser.employeeId, reqUser.role);
-    const departmentId = reqUser.departmentId ?? employeeContext.departmentId ?? null;
+    const requestedDepartmentId = dto.departmentId ?? (typeof reqUser.departmentId === 'string' || typeof reqUser.departmentId === 'number'
+      ? String(reqUser.departmentId)
+      : null);
+    const departmentId = requestedDepartmentId ?? employeeContext.departmentId ?? null;
 
     let resolvedAudience: AnnouncementAudience = isGlobal
-      ? AnnouncementAudience.ALL
+      ? (dto.targetAudience ?? AnnouncementAudience.ALL)
       : (dto.targetAudience ?? AnnouncementAudience.DEPARTMENT);
-    let resolvedTeamId: number | null = null;
+    let resolvedTeamId: number | null = isGlobal && resolvedAudience === AnnouncementAudience.TEAM
+      ? dto.teamId ?? null
+      : null;
 
     if (this.teamManagerRoles.has(normalizedRole)) {
       resolvedAudience = AnnouncementAudience.TEAM;
@@ -161,16 +237,19 @@ export class AnnouncementService {
       }
     }
 
+    if (isGlobal && dto.targetAudience === AnnouncementAudience.DEPARTMENT && departmentId === null) {
+      throw new ForbiddenException('A department announcement must target a valid department');
+    }
+
     if (resolvedAudience === AnnouncementAudience.TEAM && !resolvedTeamId) {
       throw new ForbiddenException('A team announcement must include a managed team');
     }
 
-    if (isGlobal) {
-      resolvedAudience = AnnouncementAudience.ALL;
-      resolvedTeamId = null;
+    if (resolvedAudience === AnnouncementAudience.DEPARTMENT && departmentId === null) {
+      throw new ForbiddenException('A department announcement must target a valid department');
     }
 
-    return this.prisma.announcement.create({
+    const created = await this.prisma.announcement.create({
       data: {
         title: dto.title,
         content: dto.content,
@@ -187,6 +266,19 @@ export class AnnouncementService {
         createdById: reqUser.id,
       },
     });
+
+    await this.notifyAnnouncementPublished({
+      id: created.id,
+      title: created.title,
+      targetAudience: resolvedAudience,
+      teamId: resolvedTeamId,
+      departmentId:
+        resolvedAudience === AnnouncementAudience.DEPARTMENT && departmentId !== null
+          ? String(departmentId)
+          : null,
+    });
+
+    return created;
   }
 
   async getAnnouncements(reqUser: { id?: number; role?: string; employeeId?: number | null; departmentId?: string | number | null }) {
@@ -215,7 +307,13 @@ export class AnnouncementService {
               OR: [{ expiresAt: null }, { expiresAt: { gte: now } }],
             },
             {
-              OR: [{ targetAudience: AnnouncementAudience.ALL }, { targetAudience: AnnouncementAudience.TEAM, teamId }],
+              OR: [
+                { targetAudience: AnnouncementAudience.ALL },
+                ...(departmentId !== null && departmentId !== undefined
+                  ? [{ targetAudience: AnnouncementAudience.DEPARTMENT, departmentId: String(departmentId) }]
+                  : []),
+                { targetAudience: AnnouncementAudience.TEAM, teamId },
+              ],
             },
           ],
         },
@@ -259,6 +357,9 @@ export class AnnouncementService {
   async getAnnouncementById(id: number, reqUser: any) {
     const announcement = await this.prisma.announcement.findUnique({
       where: { id },
+      include: {
+        reads: reqUser?.employeeId ? { where: { employeeId: reqUser.employeeId } } : true,
+      },
     });
 
     if (!announcement) {
@@ -346,9 +447,35 @@ export class AnnouncementService {
 
     await this.assertAnnouncementVisible(announcement, reqUser ?? { role: 'EMPLOYEE', employeeId });
 
-    return this.prisma.announcementRead.createMany({
-      data: [{ announcementId, employeeId }],
-      skipDuplicates: true,
+    return this.prisma.announcementRead.upsert({
+      where: { announcementId_employeeId: { announcementId, employeeId } },
+      update: { readAt: new Date() },
+      create: { announcementId, employeeId },
+    });
+  }
+
+  async markAsUnread(announcementId: number, employeeId: number | null | undefined, reqUser?: any) {
+    if (!employeeId) {
+      throw new ForbiddenException('An employee profile is required to mark announcements as unread');
+    }
+
+    const announcement = await this.prisma.announcement.findUnique({
+      where: { id: announcementId },
+      select: {
+        id: true,
+        targetAudience: true,
+        teamId: true,
+        departmentId: true,
+      },
+    });
+    if (!announcement) {
+      throw new NotFoundException('Announcement not found');
+    }
+
+    await this.assertAnnouncementVisible(announcement, reqUser ?? { role: 'EMPLOYEE', employeeId });
+
+    return this.prisma.announcementRead.deleteMany({
+      where: { announcementId, employeeId },
     });
   }
 

@@ -1,24 +1,23 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../../auth/auth.module';
+import { HolidaysModule } from '../../holidays/holidays.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { SettingsController } from './settings.controller';
 import { SettingsService } from './settings.service';
 import { AuditService } from './audit.service';
 import { AttendancePolicyService } from './services/attendance-policy.service';
 import { LeavePolicyService } from './services/leave-policy.service';
-import { HolidayService } from './services/holiday.service';
 import { SecurityPolicyService } from './services/security-policy.service';
 import { WorkflowPolicyService } from './services/workflow-policy.service';
 
 @Module({
-  imports: [AuthModule, PrismaModule],
+  imports: [AuthModule, HolidaysModule, PrismaModule],
   controllers: [SettingsController],
   providers: [
     SettingsService,
     AuditService,
     AttendancePolicyService,
     LeavePolicyService,
-    HolidayService,
     SecurityPolicyService,
     WorkflowPolicyService,
   ],
@@ -27,7 +26,6 @@ import { WorkflowPolicyService } from './services/workflow-policy.service';
     AuditService,
     AttendancePolicyService,
     LeavePolicyService,
-    HolidayService,
     SecurityPolicyService,
     WorkflowPolicyService,
   ],

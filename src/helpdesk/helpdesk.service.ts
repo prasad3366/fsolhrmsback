@@ -1,16 +1,19 @@
-import { ForbiddenException, Injectable, BadRequestException } from '@nestjs/common';
+import { ForbiddenException, Injectable, BadRequestException, ConflictException } from '@nestjs/common';
+import { ActionType, NotificationEntityType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateHelpdeskDto } from './dto/create-helpdesk.dto';
 import {
   AuthorizationService,
   AuthorizationUser,
 } from '../common/authorization/authorization.service';
+import { NotificationService } from '../modules/notifications/notification.service';
 
 @Injectable()
 export class HelpdeskService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly authorizationService: AuthorizationService,
+    private readonly notificationService?: NotificationService,
   ) {}
 
   private assertManagementAccess(actor: AuthorizationUser | undefined) {
@@ -32,6 +35,74 @@ export class HelpdeskService {
     return user.employee.id;
   }
 
+  private async resolveHelpdeskRecipients() {
+    const recipients = await this.prisma.user.findMany({
+      where: {
+        role: {
+          in: ['SUPER_ADMIN', 'CEO', 'HR'],
+        },
+      },
+      select: {
+        id: true,
+        role: true,
+      },
+    });
+
+    return recipients.filter((user) => !!user.id && ['SUPER_ADMIN', 'CEO', 'HR'].includes(String(user.role || '').toUpperCase()));
+  }
+
+  private async notifyHelpdeskTicketCreated(ticketId: number) {
+    if (!this.notificationService) {
+      return;
+    }
+
+    const recipients = await this.resolveHelpdeskRecipients();
+
+    for (const recipient of recipients) {
+      await this.notificationService.createNotification({
+        recipientUserId: recipient.id,
+        entityType: NotificationEntityType.HELPDESK,
+        entityId: ticketId,
+        title: 'Helpdesk ticket pending approval',
+        message: 'A new helpdesk ticket requires review and handling.',
+      });
+
+      try {
+        await this.notificationService.createActionItem({
+          recipientUserId: recipient.id,
+          entityType: NotificationEntityType.HELPDESK,
+          entityId: ticketId,
+          actionType: ActionType.REVIEW,
+        });
+      } catch (error) {
+        if (!(error instanceof ConflictException)) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async notifyHelpdeskDecision(ticketId: number, decision: 'APPROVED' | 'RESOLVED', requesterUserId: number) {
+    if (!this.notificationService) {
+      return;
+    }
+
+    await this.notificationService.resolveActionItemsForEntity({
+      entityType: NotificationEntityType.HELPDESK,
+      entityId: ticketId,
+    });
+
+    const decisionText = decision === 'APPROVED' ? 'approved' : 'resolved';
+
+    await this.notificationService.createNotification({
+      recipientUserId: requesterUserId,
+      entityType: NotificationEntityType.HELPDESK,
+      entityId: ticketId,
+      title: `Helpdesk ticket ${decisionText}`,
+      message: `Your helpdesk ticket has been ${decisionText}.`,
+    });
+  }
+
   async create(userId: number, dto: CreateHelpdeskDto) {
     if (
       typeof dto?.issue !== 'string' ||
@@ -45,7 +116,7 @@ export class HelpdeskService {
     const resolvedEmployeeId = await this.resolveEmployeeId(userId);
     const { issue, reason } = dto;
 
-    return this.prisma.helpdeskTicket.create({
+    const ticket = await this.prisma.helpdeskTicket.create({
       data: {
         userId,
         employeeId: resolvedEmployeeId,
@@ -71,6 +142,9 @@ export class HelpdeskService {
         },
       },
     });
+
+    await this.notifyHelpdeskTicketCreated(ticket.id);
+    return ticket;
   }
 
   async approve(ticketId: number, actor: AuthorizationUser | undefined) {
@@ -95,9 +169,15 @@ export class HelpdeskService {
       );
     }
 
-    return this.prisma.helpdeskTicket.findUnique({
+    const approvedTicket = await this.prisma.helpdeskTicket.findUnique({
       where: { id: ticketId },
     });
+
+    if (approvedTicket?.userId !== null && approvedTicket?.userId !== undefined) {
+      await this.notifyHelpdeskDecision(ticketId, 'APPROVED', approvedTicket.userId);
+    }
+
+    return approvedTicket;
   }
 
   async resolve(ticketId: number, actor: AuthorizationUser | undefined) {
@@ -122,9 +202,15 @@ export class HelpdeskService {
       );
     }
 
-    return this.prisma.helpdeskTicket.findUnique({
+    const resolvedTicket = await this.prisma.helpdeskTicket.findUnique({
       where: { id: ticketId },
     });
+
+    if (resolvedTicket?.userId !== null && resolvedTicket?.userId !== undefined) {
+      await this.notifyHelpdeskDecision(ticketId, 'RESOLVED', resolvedTicket.userId);
+    }
+
+    return resolvedTicket;
   }
 
   async getAll() {

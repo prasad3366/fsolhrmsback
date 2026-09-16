@@ -12,7 +12,7 @@ describe('EmployeesService employee collection authorization', () => {
   const mailService = {} as any;
   const authorizationService = {
     canAccessOrganizationWide: jest.fn((user: { role: string }) =>
-      ['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER'].includes(user.role),
+      ['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE'].includes(user.role),
     ),
   } as any;
   let service: EmployeesService;
@@ -36,10 +36,8 @@ describe('EmployeesService employee collection authorization', () => {
   );
 
   it.each(['IT_MANAGER', 'SALES_MANAGER'])(
-    '%s receives only employees from teams managed by the authenticated employee',
+    '%s receives the organization-wide employee directory',
     async (role) => {
-      teamFindMany.mockResolvedValue([{ id: 3 }, { id: 7 }]);
-
       await service.getAllEmployees({
         id: 1,
         role,
@@ -48,13 +46,8 @@ describe('EmployeesService employee collection authorization', () => {
         managerId: 999,
       } as any);
 
-      expect(teamFindMany).toHaveBeenCalledWith({
-        where: { managerId: 10 },
-        select: { id: true },
-      });
-      expect(employeeFindMany.mock.calls[0][0].where).toEqual({
-        teamId: { in: [3, 7] },
-      });
+      expect(teamFindMany).not.toHaveBeenCalled();
+      expect(employeeFindMany.mock.calls[0][0].where).toBeUndefined();
     },
   );
 
@@ -66,33 +59,30 @@ describe('EmployeesService employee collection authorization', () => {
 
     const searchWhere = employeeFindMany.mock.calls[0][0].where;
     expect(searchWhere.AND[1].OR).toContainEqual({ id: 7 });
-    expect(searchWhere.AND[0]).toEqual({ teamId: { in: [] } });
+    expect(searchWhere.AND[0]).toEqual({});
   });
 
   it.each(['IT_MANAGER', 'SALES_MANAGER'])(
-    '%s receives no employees when the authenticated employee manages no teams',
+    '%s receives the organization-wide directory without managed teams',
     async (role) => {
       await service.getAllEmployees({ id: 1, role, employeeId: 10 });
 
-      expect(employeeFindMany.mock.calls[0][0].where).toEqual({
-        teamId: { in: [] },
-      });
+      expect(employeeFindMany.mock.calls[0][0].where).toBeUndefined();
+      expect(teamFindMany).not.toHaveBeenCalled();
     },
   );
 
-  it('does not admit EMPLOYEE to the collection endpoint', () => {
+  it('allows EMPLOYEE read-only access to their own directory record', () => {
     const roles = Reflect.getMetadata('roles', EmployeesController.prototype.getAllEmployees);
 
-    expect(roles).not.toContain('EMPLOYEE');
+    expect(roles).toContain('EMPLOYEE');
   });
 
-  it('fails closed for EMPLOYEE even when the service is called directly', async () => {
+  it('allows EMPLOYEE organization-wide directory access while keeping private detail access behind the self-check guard', async () => {
     await service.getAllEmployees({ id: 1, role: 'EMPLOYEE', employeeId: 10 });
 
     expect(teamFindMany).not.toHaveBeenCalled();
-    expect(employeeFindMany.mock.calls[0][0].where).toEqual({
-      id: { in: [] },
-    });
+    expect(employeeFindMany.mock.calls[0][0].where).toBeUndefined();
   });
 });
 
@@ -436,5 +426,134 @@ describe('EmployeesService employee status synchronization', () => {
     });
     expect(employeeUpdate).toHaveBeenCalledTimes(1);
     expect(transactionState).toEqual(committedState);
+  });
+});
+
+describe('EmployeesService generic update role hardening', () => {
+  it('ignores client-supplied role changes on the generic employee update path', async () => {
+    const userUpdate = jest.fn().mockResolvedValue({});
+    const employeeUpdate = jest.fn().mockResolvedValue({ id: 7, status: 'ACTIVE' });
+    const transaction = jest.fn(async (callback) =>
+      callback({
+        user: { update: userUpdate },
+        employee: { update: employeeUpdate },
+      }),
+    );
+
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 7,
+          userId: 42,
+          status: 'ACTIVE',
+          dateOfExit: null,
+          user: { id: 42, email: 'employee@example.com' },
+        }),
+      },
+      user: { findUnique: jest.fn() },
+      $transaction: transaction,
+    } as any;
+
+    const service = new EmployeesService(prisma, {} as any, {} as any);
+
+    await service.updateEmployee(7, { firstName: 'Ada', role: 'CEO' } as any);
+
+    expect(userUpdate).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ role: 'CEO' }),
+      }),
+    );
+    expect(employeeUpdate).toHaveBeenCalledWith({
+      where: { id: 7 },
+      data: { firstName: 'Ada' },
+    });
+  });
+
+  it.each(['CEO', 'SUPER_ADMIN'])(
+    'rejects escalations from EMPLOYEE to %s by ignoring the role field on the generic update path',
+    async (role) => {
+      const userUpdate = jest.fn().mockResolvedValue({});
+      const employeeUpdate = jest.fn().mockResolvedValue({ id: 7, status: 'ACTIVE' });
+      const transaction = jest.fn(async (callback) =>
+        callback({
+          user: { update: userUpdate },
+          employee: { update: employeeUpdate },
+        }),
+      );
+
+      const prisma = {
+        employee: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 7,
+            userId: 42,
+            status: 'ACTIVE',
+            dateOfExit: null,
+            user: { id: 42, email: 'employee@example.com' },
+          }),
+        },
+        user: { findUnique: jest.fn() },
+        $transaction: transaction,
+      } as any;
+
+      const service = new EmployeesService(prisma, {} as any, {} as any);
+
+      await service.updateEmployee(7, { status: 'ACTIVE', role } as any);
+
+      expect(userUpdate).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ role }),
+        }),
+      );
+      expect(employeeUpdate).toHaveBeenCalledWith({
+        where: { id: 7 },
+        data: { status: 'ACTIVE' },
+      });
+    },
+  );
+
+  it('keeps legitimate employee profile updates working while dropping role mutation', async () => {
+    const userUpdate = jest.fn().mockResolvedValue({});
+    const employeeUpdate = jest.fn().mockResolvedValue({ id: 7, status: 'ACTIVE' });
+    const transaction = jest.fn(async (callback) =>
+      callback({
+        user: { update: userUpdate },
+        employee: { update: employeeUpdate },
+      }),
+    );
+
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 7,
+          userId: 42,
+          status: 'ACTIVE',
+          dateOfExit: null,
+          user: { id: 42, email: 'employee@example.com' },
+        }),
+      },
+      user: { findUnique: jest.fn() },
+      $transaction: transaction,
+    } as any;
+
+    const service = new EmployeesService(prisma, {} as any, {} as any);
+
+    await service.updateEmployee(7, {
+      firstName: 'Grace',
+      department: 'Engineering',
+      role: 'SUPER_ADMIN',
+    } as any);
+
+    expect(employeeUpdate).toHaveBeenCalledWith({
+      where: { id: 7 },
+      data: {
+        firstName: 'Grace',
+        department: 'Engineering',
+      },
+    });
+    expect(userUpdate).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ role: 'SUPER_ADMIN' }),
+      }),
+    );
   });
 });

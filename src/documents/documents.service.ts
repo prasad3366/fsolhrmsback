@@ -10,8 +10,6 @@ import {
   AuthorizationService,
   AuthorizationUser,
 } from '../common/authorization/authorization.service';
-import { unlink } from 'fs/promises';
-import { basename } from 'path';
 
 const ALLOWED_DOCUMENT_MIME_TYPES = new Set([
   'application/pdf',
@@ -37,69 +35,6 @@ export class DocumentsService {
     private prisma: PrismaService,
     private authorizationService: AuthorizationService,
   ) {}
-
-  async uploadDocument(
-    file: Express.Multer.File,
-    title: string,
-    documentType: string,
-    employeeId: number,
-  ) {
-    if (!file?.path) {
-      throw new BadRequestException('A file is required');
-    }
-
-    try {
-      const normalizedTitle = String(title ?? '').trim();
-      const normalizedDocumentType = String(documentType ?? '').trim();
-
-      if (!normalizedTitle) {
-        throw new BadRequestException('Title is required');
-      }
-
-      if (!normalizedDocumentType) {
-        throw new BadRequestException('Document type is required');
-      }
-
-      if (!Number.isInteger(employeeId) || employeeId <= 0) {
-        throw new BadRequestException('Invalid employee id');
-      }
-
-      const employee = await this.prisma.employee.findUnique({
-        where: { id: employeeId },
-      });
-      if (!employee) {
-        throw new NotFoundException('Employee not found');
-      }
-
-      this.validateStoredDocumentFile(file);
-
-      const document = await this.prisma.document.create({
-        data: {
-          title: normalizedTitle,
-          fileUrl: `/uploads/documents/${basename(file.filename)}`,
-          documentType: normalizedDocumentType,
-          employeeId,
-        },
-      });
-
-      return {
-        id: document.id,
-        title: document.title,
-        fileUrl: document.fileUrl,
-        employeeId: document.employeeId,
-      };
-    } catch (error) {
-      await unlink(file.path).catch(() => undefined);
-      throw error;
-    }
-  }
-
-  getEmployeeDocuments(employeeId: number) {
-    return this.prisma.document.findMany({
-      where: { employeeId },
-      orderBy: { uploadedAt: 'desc' },
-    });
-  }
 
   private validateDocumentFile(file: Express.Multer.File, fileName?: string) {
     if (!file || !file.buffer || file.buffer.length === 0) {
@@ -221,21 +156,8 @@ export class DocumentsService {
       this.validateDocumentFile(file);
 
       uploads.push(
-        this.prisma.employeeDocument.upsert({
-          where: {
-            employeeId_documentTypeId: {
-              employeeId,
-              documentTypeId,
-            },
-          },
-          update: {
-            fileName: file.originalname,
-            mimeType: file.mimetype,
-            fileData: file.buffer,
-            status: DocumentStatus.PENDING,
-            uploadedAt: new Date(),
-          },
-          create: {
+        this.prisma.employeeDocument.create({
+          data: {
             employeeId,
             documentTypeId,
             fileName: file.originalname,

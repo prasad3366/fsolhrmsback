@@ -73,6 +73,6 @@ export class TrainingController {
     @Body() dto: UpdateEnrollmentDto,
     @Req() req: any,
   ) {
-    return this.trainingService.updateEnrollmentStatus(req.user.employeeId, id, dto);
+    return this.trainingService.updateEnrollmentStatus(req.user, id, dto);
   }
 }

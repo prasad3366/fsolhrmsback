@@ -50,7 +50,7 @@ export class LeaveController {
   private async assertLeaveManagementAccess(req: any): Promise<void> {
     const role = String(req?.user?.role ?? '').toUpperCase();
 
-    if (['SUPER_ADMIN', 'HR'].includes(role)) {
+    if (['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER'].includes(role)) {
       return;
     }
 

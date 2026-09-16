@@ -1,14 +1,18 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Injectable, BadRequestException, ConflictException } from '@nestjs/common';
+import { ActionType, NotificationEntityType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RequestWfhDto } from './dto/wfh-request.dto';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
+import { AuthorizationService } from '../common/authorization/authorization.service';
+import { NotificationService } from '../modules/notifications/notification.service';
 
 @Injectable()
 export class WfhService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly workingDaysService: WorkingDaysService,
+    private readonly authorizationService: AuthorizationService = new AuthorizationService(prisma),
+    private readonly notificationService: NotificationService = new NotificationService(prisma),
   ) {}
 
   private parseBusinessDate(value: string): Date {
@@ -56,6 +60,108 @@ export class WfhService {
     );
   }
 
+  private async resolveWfhApprovalPool(requestId: number) {
+    const request = await this.prisma.wFHRequest.findUnique({
+      where: { id: requestId },
+      select: { employeeId: true },
+    });
+
+    if (!request) {
+      return [] as Array<{ userId: number; role: string; employeeId: number }>;
+    }
+
+    const candidates = await this.prisma.employee.findMany({
+        select: {
+          id: true,
+          userId: true,
+          user: { select: { role: true } },
+        },
+      where: {
+        user: {
+            role: {
+              in: ['SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER'],
+          },
+        },
+      },
+    });
+
+    const eligible: Array<{ userId: number; role: string; employeeId: number }> = [];
+
+    for (const candidate of candidates) {
+      if (!candidate.userId) {
+        continue;
+      }
+
+      const actor = {
+        id: candidate.userId,
+        role: candidate.user?.role ?? '',
+        employeeId: candidate.id,
+      };
+
+      const allowed = await this.authorizationService.canManageWfhRequest(actor, requestId);
+      if (allowed) {
+        eligible.push({
+          userId: candidate.userId,
+          role: candidate.user.role,
+          employeeId: candidate.id,
+        });
+      }
+    }
+
+    return eligible;
+  }
+
+  private async notifyWfhRequestCreated(requestId: number) {
+    const approvers = await this.resolveWfhApprovalPool(requestId);
+
+    for (const approver of approvers) {
+      try {
+        await this.notificationService.createActionItem({
+          recipientUserId: approver.userId,
+          entityType: NotificationEntityType.WFH,
+          entityId: requestId,
+          actionType: ActionType.REVIEW,
+        });
+      } catch (error) {
+        if (!(error instanceof ConflictException)) {
+          throw error;
+        }
+      }
+
+      await this.notificationService.createNotification({
+        recipientUserId: approver.userId,
+        entityType: NotificationEntityType.WFH,
+        entityId: requestId,
+        title: 'WFH request pending approval',
+        message: 'A WFH request requires your review and decision.',
+      });
+    }
+  }
+
+  private async notifyWfhDecision(requestId: number, decision: 'APPROVED' | 'REJECTED') {
+    await this.notificationService.resolveActionItemsForEntity({
+      entityType: NotificationEntityType.WFH,
+      entityId: requestId,
+    });
+
+    const request = await this.prisma.wFHRequest.findUnique({
+      where: { id: requestId },
+      include: { employee: { include: { user: true } } },
+    });
+
+    if (!request?.employee?.userId) {
+      return;
+    }
+
+    await this.notificationService.createNotification({
+      recipientUserId: request.employee.userId,
+      entityType: NotificationEntityType.WFH,
+      entityId: requestId,
+      title: `WFH request ${decision.toLowerCase()}`,
+      message: `Your WFH request has been ${decision.toLowerCase()}.`,
+    });
+  }
+
   // ==================================
   // Employee → Request WFH
   // ==================================
@@ -71,7 +177,9 @@ export class WfhService {
     }
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      let createdRequest: any;
+
+      createdRequest = await this.prisma.$transaction(async (tx) => {
         const start = this.parseBusinessDate(startDate);
         const end = this.parseBusinessDate(endDate);
 
@@ -106,11 +214,14 @@ export class WfhService {
             employeeId,
             startDate: start,
             endDate: end,
-            reason: reason ?? null, // ⭐ Save reason
+            reason: reason ?? null,
             status: 'PENDING',
           },
         });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+      await this.notifyWfhRequestCreated(createdRequest.id);
+      return createdRequest;
     } catch (error) {
       if (this.isSerializationConflict(error)) {
         throw new BadRequestException('WFH request conflicts with another request');
@@ -124,7 +235,7 @@ export class WfhService {
   // ==================================
   async approve(requestId: number) {
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      const approvedRequest = await this.prisma.$transaction(async (tx) => {
         const request = await tx.wFHRequest.findUnique({
           where: { id: requestId },
         });
@@ -158,6 +269,9 @@ export class WfhService {
           data: { status: 'APPROVED' },
         });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+      await this.notifyWfhDecision(requestId, 'APPROVED');
+      return approvedRequest;
     } catch (error) {
       if (this.isSerializationConflict(error)) {
         throw new BadRequestException('WFH approval conflicts with another request');
@@ -184,10 +298,13 @@ export class WfhService {
       );
     }
 
-    return this.prisma.wFHRequest.update({
+    const rejectedRequest = await this.prisma.wFHRequest.update({
       where: { id: requestId },
       data: { status: 'REJECTED' },
     });
+
+    await this.notifyWfhDecision(requestId, 'REJECTED');
+    return rejectedRequest;
   }
 
   // ==================================

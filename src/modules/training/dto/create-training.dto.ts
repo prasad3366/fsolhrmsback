@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsDate, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsDate, IsInt, IsNotEmpty, IsOptional, IsString, Min } from 'class-validator';
 
 export class CreateTrainingDto {
   @IsString()
@@ -25,4 +25,11 @@ export class CreateTrainingDto {
   @Type(() => Date)
   @IsDate()
   endDate!: Date;
+
+  @IsOptional()
+  @IsArray()
+  @Type(() => Number)
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  employeeIds?: number[];
 }

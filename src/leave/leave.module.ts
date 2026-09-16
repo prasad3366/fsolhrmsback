@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { HolidaysModule } from '../holidays/holidays.module'; // ⭐ REQUIRED
 import { EmployeesModule } from '../employees/employees.module';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
+import { NotificationModule } from '../modules/notifications/notification.module';
 
 const jwtSecret = process.env.JWT_SECRET;
 if (!jwtSecret || jwtSecret.trim() === '') {
@@ -22,6 +23,7 @@ if (!jwtSecret || jwtSecret.trim() === '') {
 
     // ⭐ Import HolidaysModule so HolidaysService becomes available
     HolidaysModule,
+    NotificationModule,
     forwardRef(() => EmployeesModule),
 
     JwtModule.register({

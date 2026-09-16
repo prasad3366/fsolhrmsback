@@ -7,9 +7,9 @@ import {
   PerformanceGoalStatus,
 } from './dto/performance.dto';
 
-type MockMethod = jest.MockedFunction<(...args: unknown[]) => unknown>;
+type MockMethod = jest.MockedFunction<(...args: never[]) => Promise<unknown>>;
 
-const createMockMethod = (): MockMethod => jest.fn();
+const createMockMethod = (): MockMethod => jest.fn() as unknown as MockMethod;
 
 describe('PerformanceService', () => {
   const prisma = {

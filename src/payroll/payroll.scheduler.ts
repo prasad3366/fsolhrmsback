@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { PayrollCalculator } from './payroll.calculator';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
+import { getBusinessDateKey } from '../attendance/utils/business-date.util';
 
 @Injectable()
 export class PayrollScheduler {
@@ -12,6 +13,39 @@ export class PayrollScheduler {
     private prisma: PrismaService,
     private workingDaysService: WorkingDaysService,
   ) {}
+
+  private async calculateApprovedLeaveDays(
+    employeeId: number,
+    leaves: Array<{ startDate: Date; endDate: Date; status: string }>,
+    periodStart: Date,
+    periodEnd: Date,
+  ) {
+    const leaveDates = new Map<string, Date>();
+
+    for (const leave of leaves) {
+      if (leave.status !== 'APPROVED') continue;
+
+      const leaveStart = new Date(
+        leave.startDate.getFullYear(),
+        leave.startDate.getMonth(),
+        leave.startDate.getDate(),
+      );
+      const leaveEnd = new Date(
+        leave.endDate.getFullYear(),
+        leave.endDate.getMonth(),
+        leave.endDate.getDate(),
+      );
+      const start = leaveStart > periodStart ? leaveStart : periodStart;
+      const end = leaveEnd < periodEnd ? leaveEnd : periodEnd;
+
+      for (const date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
+        const businessDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        leaveDates.set(getBusinessDateKey(businessDate), businessDate);
+      }
+    }
+
+    return (await this.workingDaysService.getWorkingDates(employeeId, [...leaveDates.values()])).length;
+  }
 
   /**
    * Runs at 00:00 on the 29th of every month to auto-generate payslips
@@ -113,27 +147,20 @@ export class PayrollScheduler {
           },
         });
 
-        let approvedLeaveDays = 0;
-
-        for (const leave of leaves) {
-          if (leave?.status !== 'APPROVED') continue;
-
-          // Prorate leaves spanning a month boundary so only the days
-          // that fall inside this payroll month are credited.
-          const overlapStart = leave.startDate < startDate ? startDate : leave.startDate;
-          const overlapEnd = leave.endDate > endDate ? endDate : leave.endDate;
-          const overlapDays =
-            Math.floor((overlapEnd.getTime() - overlapStart.getTime()) / 86400000) + 1;
-          const leaveSpanDays =
-            Math.floor((leave.endDate.getTime() - leave.startDate.getTime()) / 86400000) + 1;
-
-          approvedLeaveDays += (leave?.totalDays || 0) * (overlapDays / leaveSpanDays);
-        }
+        const paidLeaveDays = leaves.reduce(
+          (sum, leave) => sum + Number((leave as any).paidLeaveDays ?? 0),
+          0,
+        );
+        const leaveLopDays = leaves.reduce(
+          (sum, leave) => sum + Number((leave as any).lopDays ?? 0),
+          0,
+        );
 
         /* Final */
 
-        const payableDays = presentDays + approvedLeaveDays;
-        const lopDays = Math.max(workingDays - payableDays, 0);
+        const payableDays = presentDays + paidLeaveDays;
+        const attendanceLopDays = Math.max(workingDays - payableDays - leaveLopDays, 0);
+        const lopDays = leaveLopDays + attendanceLopDays;
 
         /* Calc */
 

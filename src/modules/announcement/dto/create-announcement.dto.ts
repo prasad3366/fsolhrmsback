@@ -31,6 +31,10 @@ export class CreateAnnouncementDto {
   targetAudience?: AnnouncementAudience;
 
   @IsOptional()
+  @IsString()
+  departmentId?: string;
+
+  @IsOptional()
   @Type(() => Number)
   teamId?: number;
 

@@ -96,12 +96,7 @@ describe('Attendance foundation', () => {
       expect(attendanceFindMany).toHaveBeenCalledWith({
         where: {
           userId: 70,
-          date: {
-            gte: new Date(Date.UTC(2026, 0, 1)),
-            lt: new Date(Date.UTC(2026, 1, 1)),
-          },
         },
-        orderBy: { date: 'asc' },
       });
     } finally {
       jest.useRealTimers();

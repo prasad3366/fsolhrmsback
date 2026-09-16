@@ -90,6 +90,24 @@ describe('LeaveService.requestCarryForward', () => {
   });
 });
 
+describe('LeaveService organization-wide pending requests', () => {
+  it.each([
+    ['SUPER_ADMIN', { status: 'PENDING' }],
+    ['CEO', { status: 'PENDING', employeeId: { not: 10 } }],
+    ['HR', { status: 'PENDING', employeeId: { not: 10 } }],
+  ])('uses the organization-wide pending query for %s', async (role, where) => {
+    const leaveFindMany = jest.fn().mockResolvedValue([]);
+    const service = new LeaveService({ leave: { findMany: leaveFindMany } } as any, {} as any);
+
+    await expect(service.pendingRequests(role, { id: 1, role, employeeId: 10 })).resolves.toEqual([]);
+    expect(leaveFindMany).toHaveBeenCalledWith({
+      where,
+      include: { employee: true, leaveType: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  });
+});
+
 describe('LeaveService working-day calculation', () => {
   const leaveType = {
     id: 5,
@@ -123,7 +141,7 @@ describe('LeaveService working-day calculation', () => {
     };
   };
 
-  it('stores eligible working days for a full-day request and uses them for balance validation', async () => {
+  it('stores eligible working days from the inclusive date range', async () => {
     const workingDates = [new Date(2026, 8, 4), new Date(2026, 8, 7)];
     const { service, prisma } = createService(workingDates);
 
@@ -131,6 +149,25 @@ describe('LeaveService working-day calculation', () => {
       leaveTypeId: 5,
       startDate: '2026-09-04',
       endDate: '2026-09-07',
+      durationType: 'FULL_DAY',
+      reason: 'Personal leave',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ totalDays: 2 }),
+    });
+  });
+
+  it('stores two calendar days for a date-only two-day request', async () => {
+    const { service, prisma } = createService([
+      new Date(2026, 8, 10),
+      new Date(2026, 8, 11),
+    ]);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 5,
+      startDate: '2026-09-10',
+      endDate: '2026-09-11',
       durationType: 'FULL_DAY',
       reason: 'Personal leave',
     } as any);
@@ -183,6 +220,54 @@ describe('LeaveService working-day calculation', () => {
     } as any)).rejects.toThrow('Leave must include a working day');
 
     expect(prisma.leave.create).not.toHaveBeenCalled();
+  });
+
+  it('records paid and LOP split separately when leave exceeds balance under LOP policy', async () => {
+    const workingDate = new Date(2026, 8, 4);
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, user: {} }) },
+      leaveType: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 5,
+          name: 'Casual Leave',
+          yearlyQuota: 20,
+          requiresMedical: false,
+        }),
+      },
+      leavePolicy: {
+        findFirst: jest.fn().mockResolvedValue({ annualAllocation: 20, isLossOfPay: true }),
+      },
+      leave: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 1 }),
+      },
+      leaveBalance: {
+        findUnique: jest.fn().mockResolvedValue({ allocated: 1, carryForward: 0, used: 0 }),
+        create: jest.fn(),
+      },
+      $transaction: jest.fn(),
+    } as any;
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = new LeaveService(prisma, {} as any, undefined as any, {
+      getWorkingDates: jest.fn().mockResolvedValue([workingDate]),
+    } as any);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 5,
+      startDate: '2026-09-04',
+      endDate: '2026-09-04',
+      durationType: 'FULL_DAY',
+      reason: 'Personal leave',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        totalDays: 1,
+        paidLeaveDays: 1,
+        lopDays: 0,
+        isLossOfPay: false,
+      }),
+    });
   });
 
   it.each([
@@ -266,6 +351,9 @@ describe('LeaveService L5 validation', () => {
   };
 
   const createRejectionService = () => {
+    const authorizationService = {
+      canApproveOrRejectRequest: jest.fn().mockResolvedValue(true),
+    } as any;
     const prisma = {
       leave: {
         findUnique: jest.fn()
@@ -277,7 +365,7 @@ describe('LeaveService L5 validation', () => {
       $transaction: jest.fn(),
     } as any;
     prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
-    return { service: new LeaveService(prisma, {} as any), prisma };
+    return { service: new LeaveService(prisma, {} as any, authorizationService), prisma, authorizationService };
   };
 
   it.each(['', '   '])('rejects an empty or whitespace-only reason', async (reason) => {
@@ -354,25 +442,126 @@ describe('LeaveService L5 validation', () => {
     );
     expect(prisma.leave.updateMany).toHaveBeenCalledWith({
       where: { id: 15, status: 'PENDING' },
-      data: { status: 'REJECTED', remarks: 'Not approved' },
+      data: {
+        status: 'REJECTED',
+        remarks: 'Not approved',
+        decisionByEmployeeId: 10,
+        decisionByRole: 'HR',
+        decisionAt: expect.any(Date),
+        decisionReason: 'Not approved',
+      },
     });
+  });
+
+  it('stores approval decision metadata on a successful approval', async () => {
+    const authorizationService = {
+      canApproveOrRejectRequest: jest.fn().mockResolvedValue(true),
+    } as any;
+    const prisma = {
+      leave: {
+        findUnique: jest.fn()
+          .mockResolvedValueOnce({
+            id: 15,
+            employeeId: 7,
+            leaveTypeId: 1,
+            yearStart: 2026,
+            totalDays: 2,
+            status: 'PENDING',
+            remarks: 'Approved for the reason',
+            isLossOfPay: false,
+          })
+          .mockResolvedValueOnce({
+            id: 15,
+            employeeId: 7,
+            leaveTypeId: 1,
+            yearStart: 2026,
+            totalDays: 2,
+            status: 'APPROVED',
+            remarks: 'Approved for the reason',
+            isLossOfPay: false,
+          }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 10 }) },
+      leaveBalance: {
+        findUnique: jest.fn().mockResolvedValue({ allocated: 10, carryForward: 0, used: 0 }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      $transaction: jest.fn(),
+    } as any;
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+
+    const service = new LeaveService(prisma, {} as any, authorizationService);
+    await expect(service.approveLeave(15, 10, 'HR')).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
+    expect(prisma.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 15, status: 'PENDING' },
+      data: {
+        status: 'APPROVED',
+        decisionByEmployeeId: 10,
+        decisionByRole: 'HR',
+        decisionAt: expect.any(Date),
+        decisionReason: 'Approved for the reason',
+        paidLeaveDays: 2,
+        lopDays: 0,
+      },
+    });
+  });
+
+  it('keeps pending Leave decision fields null before a decision is made', async () => {
+    const pendingLeave = {
+      id: 15,
+      employeeId: 7,
+      status: 'PENDING',
+      decisionByEmployeeId: null,
+      decisionByRole: null,
+      decisionAt: null,
+      decisionReason: null,
+    };
+    const prisma = {
+      leave: {
+        findUnique: jest.fn()
+          .mockResolvedValueOnce(pendingLeave)
+          .mockResolvedValueOnce({ ...pendingLeave, status: 'REJECTED' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 10 }) },
+      $transaction: jest.fn(),
+    } as any;
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+
+    const service = new LeaveService(prisma, {} as any, { canApproveOrRejectRequest: jest.fn().mockResolvedValue(true) } as any);
+    await expect(service.rejectLeave(15, 'Not approved', 10, 'HR')).resolves.toEqual(expect.objectContaining({ status: 'REJECTED' }));
+    expect(prisma.leave.findUnique).toHaveBeenCalled();
+    expect(pendingLeave.decisionByEmployeeId).toBeNull();
+    expect(pendingLeave.decisionByRole).toBeNull();
+    expect(pendingLeave.decisionAt).toBeNull();
+    expect(pendingLeave.decisionReason).toBeNull();
   });
 });
 
 describe('LeaveService manager-scoped approval', () => {
   const leave = { id: 15, employeeId: 77, leaveTypeId: 5, yearStart: 2026, totalDays: 2, status: 'PENDING' };
 
-  const createService = (role: string, canAccessEmployee = true, finalStatus: 'APPROVED' | 'REJECTED' = 'APPROVED') => {
-    const authorizationService = { canAccessEmployee: jest.fn().mockResolvedValue(canAccessEmployee) } as any;
+  const createService = (
+    role: string,
+    canApproveOrReject = true,
+    finalStatus: 'APPROVED' | 'REJECTED' = 'APPROVED',
+    initialStatus: 'PENDING' | 'APPROVED' | 'REJECTED' = 'PENDING',
+  ) => {
+    const authorizationService = {
+      canApproveOrRejectRequest: jest.fn().mockResolvedValue(canApproveOrReject),
+    } as any;
     const prisma = {
       leave: {
-        findUnique: jest.fn().mockResolvedValueOnce(leave).mockResolvedValueOnce({ ...leave, status: finalStatus }),
+        findUnique: jest.fn()
+          .mockResolvedValueOnce({ ...leave, status: initialStatus })
+          .mockResolvedValueOnce({ ...leave, status: finalStatus }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       employee: {
         findUnique: jest.fn().mockImplementation(async ({ select }: any) =>
           select?.team
-            ? { id: 77, user: { role: 'EMPLOYEE' }, team: { name: role === 'IT_MANAGER' ? 'IT' : 'SALES' } }
+            ? { id: 77, user: { role: 'EMPLOYEE' }, team: { name: role === 'IT_MANAGER' ? 'IT' : role === 'SALES_MANAGER' ? 'SALES' : role === 'FINANCE_MANAGER' ? 'FINANCE' : 'IT' } }
             : { id: 10 },
         ),
       },
@@ -386,34 +575,65 @@ describe('LeaveService manager-scoped approval', () => {
     return { service: new LeaveService(prisma, {} as any, authorizationService), authorizationService, prisma, role };
   };
 
-  it.each(['SUPER_ADMIN', 'HR'])('%s can approve an employee leave', async (role) => {
-    const { service } = createService(role);
-    await expect(service.approveLeave(15, 10, role)).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
-  });
-
-  it.each(['IT_MANAGER', 'SALES_MANAGER'])('%s can approve its team leave', async (role) => {
+  it.each([
+    ['IT_MANAGER', 10],
+    ['SALES_MANAGER', 10],
+    ['FINANCE_MANAGER', 10],
+    ['HR', 10],
+    ['SUPER_ADMIN', 10],
+  ])('valid %s approval is allowed', async (role, approverId) => {
     const { service } = createService(role, true);
-    await expect(service.approveLeave(15, 10, role)).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
+    await expect(service.approveLeave(15, approverId, role)).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
   });
 
-  it.each(['IT_MANAGER', 'SALES_MANAGER'])('%s cannot approve outside-team leave', async (role) => {
+  it('CEO approval is allowed when hierarchy permits', async () => {
+    const { service, authorizationService } = createService('CEO', true);
+    await expect(service.approveLeave(15, 5, 'CEO')).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 5, role: 'CEO', employeeId: 5 }, 77);
+  });
+
+  it.each(['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'])('wrong %s approval is rejected', async (role) => {
     const { service, authorizationService, prisma } = createService(role, false);
     await expect(service.approveLeave(15, 999, role)).rejects.toThrow('Unauthorized to approve leave');
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalled();
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 999, role, employeeId: 999 }, 77);
     expect(prisma.leave.updateMany).not.toHaveBeenCalled();
   });
 
-  it.each(['CEO', 'FINANCE_MANAGER', 'EMPLOYEE'])('%s remains denied', async (role) => {
-    const { service, prisma } = createService(role);
-    await expect(service.approveLeave(15, 10, role)).rejects.toThrow('Unauthorized to approve leave');
+  it('manager self-approval is rejected', async () => {
+    const { service, authorizationService, prisma } = createService('IT_MANAGER', false);
+    await expect(service.approveLeave(15, 77, 'IT_MANAGER')).rejects.toThrow('Unauthorized to approve leave');
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 77, role: 'IT_MANAGER', employeeId: 77 }, 77);
     expect(prisma.leave.updateMany).not.toHaveBeenCalled();
   });
 
-  it('uses the stored leave owner for manager rejection', async () => {
+  it('employee self-approval is rejected', async () => {
+    const { service, authorizationService, prisma } = createService('EMPLOYEE', false);
+    await expect(service.approveLeave(15, 77, 'EMPLOYEE')).rejects.toThrow('Unauthorized to approve leave');
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 77, role: 'EMPLOYEE', employeeId: 77 }, 77);
+    expect(prisma.leave.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('finalized leave cannot receive a second decision', async () => {
+    const { service, prisma } = createService('HR', true, 'APPROVED', 'APPROVED');
+    await expect(service.approveLeave(15, 10, 'HR')).rejects.toThrow('Leave already processed');
+    expect(prisma.leave.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('uses the shared approval method for manager rejection', async () => {
     const { service, authorizationService, prisma } = createService('IT_MANAGER', true, 'REJECTED');
     await expect(service.rejectLeave(15, 'Not approved', 999, 'IT_MANAGER')).resolves.toEqual(expect.objectContaining({ status: 'REJECTED' }));
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith({ id: 999, role: 'IT_MANAGER', employeeId: 999 }, 77);
-    expect(prisma.leave.updateMany).toHaveBeenCalledWith({ where: { id: 15, status: 'PENDING' }, data: { status: 'REJECTED', remarks: 'Not approved' } });
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 999, role: 'IT_MANAGER', employeeId: 999 }, 77);
+    expect(prisma.leave.updateMany).toHaveBeenCalledWith({
+      where: { id: 15, status: 'PENDING' },
+      data: {
+        status: 'REJECTED',
+        remarks: 'Not approved',
+        decisionByEmployeeId: 999,
+        decisionByRole: 'IT_MANAGER',
+        decisionAt: expect.any(Date),
+        decisionReason: 'Not approved',
+      },
+    });
   });
 
   it('filters manager history in the database before pagination', async () => {
@@ -487,7 +707,10 @@ function createTransactionalApprovalHarness(
       release();
     }
   });
-  const prisma = { $transaction: transaction } as any;
+  const prisma = {
+    $transaction: transaction,
+    employee: { findUnique: jest.fn().mockResolvedValue({ userId: null }) },
+  } as any;
   return { state, prisma };
 }
 
@@ -533,7 +756,13 @@ function createTransactionalApplicationHarness(existingLeaves: any[] = []) {
       release();
     }
   });
-  return { state, prisma: { $transaction: transaction } as any };
+  return {
+    state,
+    prisma: {
+      $transaction: transaction,
+      employee: { findUnique: jest.fn().mockResolvedValue({ userId: null }) },
+    } as any,
+  };
 }
 
 describe('LeaveService L4 concurrency integrity', () => {
@@ -545,7 +774,10 @@ describe('LeaveService L4 concurrency integrity', () => {
     totalDays: 2,
     status: 'PENDING',
   };
-  const authorizationService = { canAccessEmployee: jest.fn() } as any;
+  const authorizationService = {
+    canApproveOrRejectRequest: jest.fn().mockResolvedValue(true),
+    canAccessEmployee: jest.fn().mockResolvedValue(true),
+  } as any;
 
   it('allows only one sequential approval and consumes balance once', async () => {
     const harness = createTransactionalApprovalHarness([leave], { allocated: 2, carryForward: 0, used: 0 });

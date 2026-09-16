@@ -40,7 +40,6 @@ describe('Recruitment job and candidate mutations', () => {
     expect(service.deleteJob).toHaveBeenCalledWith(7);
     expect(Reflect.getMetadata('roles', RecruitmentController.prototype.deleteJob)).toEqual([
       'SUPER_ADMIN',
-      'Super_admin',
       'CEO',
       'HR',
     ]);
@@ -49,6 +48,23 @@ describe('Recruitment job and candidate mutations', () => {
     await expect(controller.deleteCandidate(3)).resolves.toEqual({ id: 3 });
     expect(service.updateJob).toHaveBeenCalledWith(7, { title: 'Updated' });
     expect(service.deleteCandidate).toHaveBeenCalledWith(3);
+  });
+
+  it('keeps job visibility broad but candidate visibility management-only', () => {
+    expect(Reflect.getMetadata('roles', RecruitmentController.prototype.findJobs)).toEqual([
+      'SUPER_ADMIN',
+      'CEO',
+      'HR',
+      'FINANCE_MANAGER',
+      'IT_MANAGER',
+      'SALES_MANAGER',
+      'EMPLOYEE',
+    ]);
+    expect(Reflect.getMetadata('roles', RecruitmentController.prototype.findCandidates)).toEqual([
+      'SUPER_ADMIN',
+      'CEO',
+      'HR',
+    ]);
   });
 
   it('updates only the supported job posting fields', async () => {

@@ -79,7 +79,7 @@ describe('Teams authorization regression coverage', () => {
     },
   );
 
-  it.each(['FINANCE_MANAGER', 'EMPLOYEE', 'UNKNOWN'])('%s is denied team listing', async (role) => {
+  it.each(['EMPLOYEE', 'UNKNOWN'])('%s is denied team listing', async (role) => {
     const { service, repo } = createService();
 
     await expect(service.getAllTeams({ role, employeeId: 10 })).rejects.toThrow(
@@ -89,6 +89,45 @@ describe('Teams authorization regression coverage', () => {
     expect(repo.findByManager).not.toHaveBeenCalled();
   });
 
+  it('returns only the authenticated employee team', async () => {
+    const { service, prisma, repo } = createService();
+    const ownTeam = team(7, 10);
+    prisma.employee.findUnique.mockResolvedValue({ id: 25, team: ownTeam });
+
+    await expect(service.getMyTeam(25, { role: 'EMPLOYEE', employeeId: 25 })).resolves.toEqual([
+      expect.objectContaining({ id: ownTeam.id }),
+    ]);
+    expect(prisma.employee.findUnique).toHaveBeenCalledWith({
+      where: { id: 25 },
+      include: {
+        team: {
+          include: {
+            manager: true,
+            members: true,
+          },
+        },
+      },
+    });
+    expect(repo.findAll).not.toHaveBeenCalled();
+    expect(repo.findByManager).not.toHaveBeenCalled();
+  });
+
+  it('returns no team when the authenticated employee has no team', async () => {
+    const { service, prisma } = createService();
+    prisma.employee.findUnique.mockResolvedValue({ id: 25, team: null });
+
+    await expect(service.getMyTeam(25, { role: 'EMPLOYEE', employeeId: 25 })).resolves.toEqual([]);
+  });
+
+  it('prevents an employee from resolving another employee team', async () => {
+    const { service, prisma } = createService();
+
+    await expect(service.getMyTeam(99, { role: 'EMPLOYEE', employeeId: 25 })).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(prisma.employee.findUnique).not.toHaveBeenCalled();
+  });
+
   it('fails closed when the user or role is missing', async () => {
     const { service } = createService();
 
@@ -96,7 +135,7 @@ describe('Teams authorization regression coverage', () => {
     await expect(service.getAllTeams({ employeeId: 10 })).rejects.toThrow(ForbiddenException);
   });
 
-  it.each(['SUPER_ADMIN', 'CEO'])('%s may create and delete teams', async (role) => {
+  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('%s may create and delete teams', async (role) => {
     const { service, repo } = createService();
     const created = { id: 3 };
     repo.findManager.mockResolvedValue({ id: 30, user: { role: 'IT_MANAGER' } });
@@ -111,7 +150,7 @@ describe('Teams authorization regression coverage', () => {
     });
   });
 
-  it.each(['HR', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER', 'EMPLOYEE', 'UNKNOWN'])(
+  it.each(['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER', 'EMPLOYEE', 'UNKNOWN'])(
     '%s cannot create or delete teams',
     async (role) => {
       const { service, repo } = createService();
@@ -128,10 +167,15 @@ describe('Teams authorization regression coverage', () => {
   it('controller management role metadata excludes non-admin roles', () => {
     const createRoles = Reflect.getMetadata('roles', TeamController.prototype.createTeam);
     const deleteRoles = Reflect.getMetadata('roles', TeamController.prototype.deleteTeam);
+    const selfViewRoles = Reflect.getMetadata('roles', TeamController.prototype.getMyTeam);
 
-    expect(createRoles).toEqual(['SUPER_ADMIN', 'CEO']);
-    expect(deleteRoles).toEqual(['SUPER_ADMIN', 'CEO']);
+    expect(createRoles).toEqual(['SUPER_ADMIN', 'CEO', 'HR']);
+    expect(deleteRoles).toEqual(['SUPER_ADMIN', 'CEO', 'HR']);
     expect(createRoles).not.toContain('FINANCE_MANAGER');
     expect(createRoles).not.toContain('EMPLOYEE');
+    expect(selfViewRoles).toContain('EMPLOYEE');
+    expect(selfViewRoles).toContain('IT_MANAGER');
+    expect(selfViewRoles).toContain('SALES_MANAGER');
+    expect(selfViewRoles).toContain('FINANCE_MANAGER');
   });
 });

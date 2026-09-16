@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { AttendanceStatus } from '@prisma/client';
 import { AttendanceService } from './attendance.service';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
+import { getBusinessDateKey } from './utils/business-date.util';
 
 describe('AttendanceService target summary', () => {
   const prisma = {
@@ -109,6 +110,9 @@ describe('AttendanceService target summary', () => {
 describe('AttendanceService employee scope', () => {
   const employeeFindMany = jest.fn();
   const teamFindMany = jest.fn();
+  const authorizationService = {
+    canAccessEmployee: jest.fn().mockResolvedValue(true),
+  } as any;
   const prisma = {
     employee: { findMany: employeeFindMany },
     team: { findMany: teamFindMany },
@@ -119,10 +123,12 @@ describe('AttendanceService employee scope', () => {
     jest.clearAllMocks();
     employeeFindMany.mockResolvedValue([]);
     teamFindMany.mockResolvedValue([{ id: 2 }]);
+    authorizationService.canAccessEmployee.mockResolvedValue(true);
   });
 
   it('scopes manager search by teamId and never designation', async () => {
-    const service = new AttendanceService(prisma, holidayService);
+    employeeFindMany.mockResolvedValue([{ id: 21, teamId: 2 }]);
+    const service = new AttendanceService(prisma, holidayService, authorizationService);
 
     await service.getAttendanceEmployees(
       { user: { employeeId: 11, role: 'SALES_MANAGER' } },
@@ -142,15 +148,34 @@ describe('AttendanceService employee scope', () => {
     expect(employeeFindMany.mock.calls[0][0].where.AND[1].OR).not.toContainEqual(
       expect.objectContaining({ designation: expect.anything() }),
     );
+    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(
+      { employeeId: 11, role: 'SALES_MANAGER' },
+      21,
+    );
   });
 
-  it.each(['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER'])('allows %s to search active employees organization-wide', async (role) => {
+  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('allows %s to search active employees organization-wide', async (role) => {
     const service = new AttendanceService(prisma, holidayService);
 
     await service.getAttendanceEmployees({ user: { employeeId: 1, role } }, '7');
 
     expect(teamFindMany).not.toHaveBeenCalled();
     expect(employeeFindMany.mock.calls[0][0].where.AND[0]).toEqual({ status: 'ACTIVE' });
+  });
+
+  it('scopes Finance attendance employees to managed Finance teams', async () => {
+    employeeFindMany.mockResolvedValue([{ id: 31, teamId: 2 }]);
+    const service = new AttendanceService(prisma, holidayService, authorizationService);
+    await service.getAttendanceEmployees({ user: { employeeId: 1, role: 'FINANCE_MANAGER' } }, '7');
+
+    expect(teamFindMany).toHaveBeenCalledWith({ where: { managerId: 1 }, select: { id: true } });
+    expect(employeeFindMany.mock.calls[0][0].where.AND[0]).toEqual({
+      teamId: { in: [2] },
+    });
+    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(
+      { employeeId: 1, role: 'FINANCE_MANAGER' },
+      31,
+    );
   });
 
   it('restricts employees to their own active employee record', async () => {
@@ -719,7 +744,13 @@ describe('AttendanceService historical reads', () => {
     const presentDate = new Date(2026, 8, 29);
     const olderDate = new Date(2026, 8, 3);
     const prisma = {
-      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
+      employee: {
+        findUnique: jest.fn().mockImplementation(({ where }: any) =>
+          where.userId === 70
+            ? { id: 7, userId: 70 }
+            : { id: 7, userId: 70 },
+        ),
+      },
       attendanceRecord: {
         findMany: jest.fn().mockResolvedValue([
           { userId: 70, date: presentDate, status: AttendanceStatus.PRESENT, totalHours: 8 },
@@ -781,7 +812,7 @@ describe('AttendanceService historical reads', () => {
   });
 
   it('keeps inactive employee attendance history readable', async () => {
-    const attendance = [{ id: 1, employeeId: 7, date: new Date('2026-08-01') }];
+    const attendance = [{ id: 1, employeeId: 7, date: new Date('2026-08-01'), status: undefined, locationLabel: 'Unknown' }];
     const prisma = {
       employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70, status: 'INACTIVE' }) },
       attendanceRecord: { findMany: jest.fn().mockResolvedValue(attendance), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
@@ -1284,6 +1315,60 @@ describe('AttendanceService shared working-day integration', () => {
     );
   });
 
+  it('keeps summary counts aligned with monthly details classification', async () => {
+    const workingDates = [
+      new Date(Date.UTC(2026, 7, 3)),
+      new Date(Date.UTC(2026, 7, 4)),
+      new Date(Date.UTC(2026, 7, 5)),
+      new Date(Date.UTC(2026, 7, 6)),
+      new Date(Date.UTC(2026, 7, 7)),
+    ];
+    const { service, prisma } = createService(workingDates);
+    prisma.attendanceRecord.findMany.mockResolvedValue([
+      {
+        date: workingDates[0],
+        clockIn: new Date('2026-08-03T04:00:00.000Z'),
+        clockOut: new Date('2026-08-03T12:00:00.000Z'),
+        status: AttendanceStatus.PRESENT,
+      },
+      {
+        date: workingDates[1],
+        clockIn: new Date('2026-08-04T04:00:00.000Z'),
+        clockOut: new Date('2026-08-04T08:30:00.000Z'),
+        status: AttendanceStatus.PRESENT,
+      },
+      {
+        date: workingDates[2],
+        clockIn: new Date('2026-08-05T04:00:00.000Z'),
+        status: AttendanceStatus.IN_PROGRESS,
+      },
+    ]);
+    prisma.leave.findMany.mockResolvedValue([
+      { status: 'APPROVED', startDate: workingDates[3], endDate: workingDates[3] },
+    ]);
+
+    const details = await service.getAttendanceHistory(70, 8, 2026) as any[];
+    const summary = await service.getEmployeeMonthlySummary(7, '2026-08');
+
+    expect(details.map((record) => record.status)).toEqual([
+      AttendanceStatus.PRESENT,
+      AttendanceStatus.HALF_DAY,
+      AttendanceStatus.IN_PROGRESS,
+      AttendanceStatus.LEAVE,
+      AttendanceStatus.ABSENT,
+    ]);
+    expect(summary).toEqual(expect.objectContaining({
+      workingDays: 5,
+      presentDays: 1,
+      halfDays: 1,
+      leaveDays: 1,
+      absentDays: 2,
+    }));
+    expect(summary.workingDays).toBe(
+      summary.presentDays + summary.halfDays + summary.absentDays + summary.leaveDays,
+    );
+  });
+
   it('calculates independent summaries for normal and Sales employees', async () => {
     const normalWorkingDates = [
       new Date(Date.UTC(2026, 7, 3)),
@@ -1296,9 +1381,10 @@ describe('AttendanceService shared working-day integration', () => {
     ];
     const prisma = {
       employee: {
-        findUnique: jest.fn().mockImplementation(({ where }: any) => where.id === 7
-          ? { id: 7, userId: 70, team: null }
-          : { id: 8, userId: 80, team: { name: 'SALES' } }),
+        findUnique: jest.fn().mockImplementation(({ where }: any) =>
+          where.id === 7 || where.userId === 70
+            ? { id: 7, userId: 70, team: null }
+            : { id: 8, userId: 80, team: { name: 'SALES' } }),
       },
       attendanceRecord: {
         findMany: jest.fn().mockImplementation(({ where }: any) => where.userId === 70
@@ -1389,7 +1475,7 @@ describe('AttendanceService shared working-day integration', () => {
     const salesSaturday = new Date(Date.UTC(2026, 7, 1));
     const holidayService = {
       isHoliday: jest.fn(async (date: Date) =>
-        date.getTime() === salesSaturday.getTime() ? { date } : null,
+        getBusinessDateKey(date) === getBusinessDateKey(salesSaturday) ? { date } : null,
       ),
     } as any;
     const prisma = {
@@ -1579,5 +1665,28 @@ describe('AttendanceService WFH location working-day integration', () => {
     await service.punchIn(7, 1, 2);
 
     expect(getWorkingDatesSpy).toHaveBeenCalledWith(7, [new Date(Date.UTC(2026, 8, 7))]);
+  });
+
+  it.each([
+    ['OFFICE', 'OFFICE', 'In Office'],
+    ['OFFICE', 'OUTSIDE', 'Checked Out Outside Office'],
+    ['OUTSIDE', 'OFFICE', 'Checked In Outside Office'],
+    ['OUTSIDE', 'OUTSIDE', 'Out of Office'],
+  ])('returns %s + %s as %s in Employee Attendance history', async (punchInLocationStatus, punchOutLocationStatus, locationLabel) => {
+    const { service, prisma } = createService({ teamName: null });
+    prisma.attendanceRecord.findMany.mockResolvedValueOnce([{
+      id: 1,
+      userId: 70,
+      date: new Date(2026, 8, 7),
+      clockIn: new Date(2026, 8, 7, 9),
+      clockOut: new Date(2026, 8, 7, 17),
+      status: AttendanceStatus.PRESENT,
+      punchInLocationStatus,
+      punchOutLocationStatus,
+    }]);
+
+    await expect(service.getAttendanceHistory(70)).resolves.toEqual([
+      expect.objectContaining({ locationLabel }),
+    ]);
   });
 });

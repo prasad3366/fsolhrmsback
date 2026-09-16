@@ -1,0 +1,242 @@
+CURRENT SYSTEM MAP REPORT
+
+Date: 2026-09-13
+Project: HRMS backend + frontend requirements review
+Scope: Current implementation only; no code changes made yet.
+
+============================================================
+A. AUTHORITATIVE ATTENDANCE SERVICE / RESULT
+============================================================
+Source of truth:
+- src/attendance/attendance.service.ts
+
+Key observations:
+- Attendance status is derived in the attendance service using effectiveStatus(), effectiveRecord(), buildLeaveAwareStatusMap(), and getAttendanceHistory().
+- The service decides present / absent / half-day / leave / in-progress using stored clock-in and clock-out records and applied leave-overlap rules.
+- Punch-in and punch-out location detection is also performed there via getLocationStatus().
+- Office detection compares lat/lng against the configured office location radius using distanceMeters() and the office location record.
+- WFH and non-working-day rules are also applied in this same service.
+
+Important constraint:
+- Attendance status behavior is authoritative in the backend and must not be changed to support the display-only location requirement.
+
+============================================================
+B. AUTHORITATIVE EMPLOYEE DIRECTORY SERVICE / RESULT
+============================================================
+Source of truth:
+- src/employees/employees.service.ts
+- src/employees/employees.controller.ts
+- src/common/authorization/authorization.service.ts
+
+Key observations:
+- getAllEmployees() in EmployeesService is the central employee list provider.
+- Controller route GET /employees is protected by RolesGuard and currently excludes EMPLOYEE from the allowed roles.
+- AuthorizationService.canAccessOrganizationWide() allows only super-admin / CEO / HR / certain managers for employee-wide access in the default employee scope.
+- canAccessEmployee() specifically allows EMPLOYEE to access only their own employeeId.
+
+Current root cause of “Access denied”:
+- This is enforced in backend authorization, not just a frontend issue.
+- The list route and auth logic are the authoritative access gate.
+
+Minimal required fix:
+- Allow a narrow read-only employee directory for EMPLOYEE users while preserving all existing sensitive-data protections.
+- Reuse the existing employee listing flow; do not create a second parallel directory logic.
+===
+============================================================
+C. AUTHORITATIVE LEAVE SERVICE / RESULT
+============================================================
+Source of truth:
+- src/leave/leave.service.ts
+
+Key observations:
+- applyLeave() validates date range, overlap, working-day inclusion, policy/annual quota, and medical-document rules.
+- It creates a Leave record containing totalDays, durationType, isLossOfPay, yearStart, and related metadata.
+- approveLeave() checks the relevant LeaveBalance and increments used by leave.totalDays when approved and not LOP.
+- leave overlap validation, eligibility, quota assignment, and approval flow all live here.
+
+Current limitation:
+- The system can represent only a single boolean isLossOfPay on a leave request.
+- It cannot express one request containing both paid days and LOP days.
+- This is exactly why the leave quota + LOP requirement is sensitive.
+
+============================================================
+D. AUTHORITATIVE LEAVEBALANCE FLOW
+============================================================
+Source of truth:
+- src/leave/leave.service.ts
+- prisma/schema.prisma
+
+Key observations:
+- LeaveBalance has: employeeId, leaveTypeId, yearStart, allocated, used, carryForward.
+- getBalance() and selfBalance() compute remaining as:
+  allocated + carryForward - used
+- approveLeave() increments used by totalDays only for non-LOP approved leave.
+- cancelLeave() decrements used only for approved non-LOP leave.
+
+This means:
+- LeaveBalance.used is currently treated as the paid-consumed total.
+- LOP does not currently reduce used.
+- The design requirement is aligned with this intended semantics, but the current Leave model cannot represent mixed paid + LOP split within one request.
+
+============================================================
+E. AUTHORITATIVE PAYROLL CALCULATION FLOW
+============================================================
+Source of truth:
+- src/payroll/payroll.service.ts
+- src/payroll/payroll.scheduler.ts
+
+Key observations:
+- computePayroll() calculates workingDays for the month.
+- It fetches attendance history through AttendanceService.
+- It counts present and leave days to derive payableDays.
+- It computes:
+  payableDays = presentDays + approvedLeaveDays
+  lopDays = max(workingDays - payableDays, 0)
+- Payroll then runs PayrollCalculator.calculate() with workingDays and lopDays.
+
+Important issue:
+- Payroll currently reconstructs leave-day business logic from attendance + leave records instead of consuming a canonical leave-domain split.
+- This violates the requirement that payroll must consume the authoritative Leave result and not independently reconstruct leave/LOP rules.
+
+============================================================
+F. EXACTLY WHERE EACH REQUESTED CHANGE BELONGS
+============================================================
+1) Employee Directory access
+- Backend: src/employees/employees.service.ts
+- Backend auth: src/common/authorization/authorization.service.ts
+- Controller: src/employees/employees.controller.ts
+- Frontend: employee list consumer + API wrapper only
+
+2) Employee Attendance location display
+- Backend authoritative logic: src/attendance/attendance.service.ts
+- Frontend render-only: screens showing attendance details
+- No new independent classification rule should be introduced in frontend.
+
+3) Leave quota + LOP
+- Core business logic: src/leave/leave.service.ts
+- Persistence: prisma/schema.prisma
+- Downstream consumption: src/payroll/payroll.service.ts and src/payroll/payroll.scheduler.ts
+- Frontend: display only, if needed
+
+============================================================
+G. EXISTING LOGIC THAT MUST NOT BE DUPLICATED
+============================================================
+These must remain single-source and must not be recreated elsewhere:
+- attendance status classification
+- leave eligibility and quota logic
+- carry-forward logic
+- working-day calculation
+- holiday rules
+- Sales Saturday behavior
+- leave approval hierarchy
+- WFH and office/outside determination
+- payroll working-day calculation
+- authorization behavior
+- notification flows
+
+The high-risk duplication points are:
+- payroll recalculating leave days independently
+- frontend inventing attendance location display rules instead of reusing the canonical backend result
+- creating a second employee-directory business rule instead of extending the existing list service
+
+============================================================
+H. EXISTING TESTS THAT PROTECT CURRENT BEHAVIOR
+============================================================
+Relevant backend tests:
+- src/attendance/attendance.service.spec.ts
+- src/employees/employees.service.spec.ts
+- src/leave/leave.service.spec.ts
+- src/leave/leave.master.spec.ts
+- src/payroll/payroll.service.spec.ts
+- src/payroll/payroll.scheduler.spec.ts
+
+Relevant backend auth tests:
+- src/common/authorization/authorization.service.spec.ts
+
+These tests protect:
+- attendance logic
+- employee access rules
+- leave approval and cancellation
+- leave carry-forward and balance usage
+- payroll generation
+
+============================================================
+PHASE 2: REQUIREMENT 1 DESIGN
+============================================================
+Employee role users must be able to open the Employee Directory and see ALL employees.
+Current denied behavior is backend controlled, not frontend-only.
+
+Safe implementation direction:
+- Keep the directory route read-only and static
+- Allow EMPLOYEE to read only non-sensitive employee directory fields
+- Enforce sorting by empCode ascending deterministically on backend
+- Make the directory query safe with minimal projection or DTO extension
+- Reuse getAllEmployees() if possible; do not create a second employee directory service
+
+============================================================
+PHASE 3: REQUIREMENT 2 DESIGN
+============================================================
+Attendance display-only location classification:
+- backend canonical location classification should be derived from existing attendance geolocation and office location logic
+- do not change underlying attendance status rules
+- classify based on check-in and check-out relative to office boundary
+
+Requested display mapping:
+1. check-in office + check-out office => "In Office"
+2. check-in office + check-out outside => "Checked Out Outside Office"
+3. check-in outside + check-out office => "Checked In Outside Office"
+4. check-in outside + check-out outside => "Out of Office"
+5. missing checkout / missing coordinates => safe "Unknown"
+6. status behavior remains unchanged
+
+Preferred implementation:
+- add a derived property to the attendance response in AttendanceService
+- frontend only renders it
+- do not create a parallel location classification system in the frontend
+
+============================================================
+PHASE 4: REQUIREMENT 3 DESIGN
+============================================================
+The most sensitive requirement is leave quota + LOP behavior.
+Current state:
+- LeaveService is the authoritative source for leave decisions
+- LeaveBalance used should represent only paid leave consumed
+- LOP must not reduce paid balance
+
+Required canonical split:
+- requestedDays
+- paidLeaveDays
+- lopDays
+
+Minimal additive schema change:
+- add paidLeaveDays and lopDays to the Leave model
+- keep existing totalDays and isLossOfPay for compatibility
+- ensure LeaveBalance.used increments only by paidLeaveDays
+
+Formula:
+- paidLeaveDays = min(requestedDays, available paid quota)
+- lopDays = max(requestedDays - paidLeaveDays, 0)
+- this works for multi-day and half-day requests
+
+Approved behavior:
+- PENDING: no paid balance consumption
+- REJECTED: no paid balance consumption
+- CANCELLED: restore only the paid portion already consumed
+- APPROVED: consume only paidLeaveDays; persist canonical LOP portion
+
+Payroll must consume the authoritative Leave result and not recalculate its own leave/LOP rules.
+
+Maternity logic must remain centralized in Leave domain and must not be implemented as a hardcoded employee gender check.
+
+============================================================
+FINAL CONCLUSION
+============================================================
+The actual authoritative business flows are:
+- Employee directory: EmployeesService + authorization service
+- Attendance: AttendanceService
+- Leave: LeaveService + LeaveBalance
+- Payroll: PayrollService consumes attendance/leave-derived numbers
+
+The requirements map cleanly to minimal additive extension of those current flows; they do not require broad redesign or duplicative logic.
+
+No code has been modified in this analysis pass. This report reflects the current executable code as the source of truth.

@@ -47,4 +47,10 @@ export class DashboardController {
     );
     res.send(csv);
   }
+
+  @Get()
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE')
+  getDashboard(@Req() req: Request) {
+    return this.dashboardService.getDashboard(req.user as any);
+  }
 }

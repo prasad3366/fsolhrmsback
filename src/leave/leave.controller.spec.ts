@@ -34,4 +34,24 @@ describe('LeaveController rejection validation', () => {
 
     expect(errors.length).toBeGreaterThan(0);
   });
+
+  it.each(['CEO', 'FINANCE_MANAGER'])('allows %s to reach canonical Leave authorization', async (role) => {
+    const service = { approveLeave: jest.fn().mockResolvedValue({ id: 15 }) } as any;
+    const controller = new LeaveController(service, {} as any);
+
+    await expect(controller.approve({ user: { id: 1, role, employeeId: 10 } }, '15'))
+      .resolves.toEqual({ id: 15 });
+
+    expect(service.approveLeave).toHaveBeenCalledWith(15, 10, role);
+  });
+
+  it('rejects EMPLOYEE before an approval service call', async () => {
+    const service = { approveLeave: jest.fn() } as any;
+    const controller = new LeaveController(service, {} as any);
+
+    await expect(
+      controller.approve({ user: { id: 1, role: 'EMPLOYEE', employeeId: 10 } }, '15'),
+    ).rejects.toThrow('Access denied');
+    expect(service.approveLeave).not.toHaveBeenCalled();
+  });
 });

@@ -68,4 +68,9 @@ export class AnnouncementController {
   markAsRead(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.announcementService.markAsRead(id, req.user.employeeId, req.user);
   }
+
+  @Delete(':id/read')
+  markAsUnread(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.announcementService.markAsUnread(id, req.user.employeeId, req.user);
+  }
 }

@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 
@@ -26,6 +28,7 @@ import { TrainingModule } from './modules/training/training.module';
 import { AnnouncementModule } from './modules/announcement/announcement.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { SettingsModule } from './modules/settings/settings.module';
+import { NotificationModule } from './modules/notifications/notification.module';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 
 @Module({
@@ -54,8 +57,11 @@ import { AuditInterceptor } from './common/interceptors/audit.interceptor';
     AnnouncementModule,
     ReportsModule,
     SettingsModule,
+    NotificationModule,
   ],
+  controllers: [AppController],
   providers: [
+    AppService,
     PrismaService,
     WfhScheduler,
     EmployeeExitScheduler,

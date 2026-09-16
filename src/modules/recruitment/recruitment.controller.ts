@@ -23,21 +23,13 @@ export class RecruitmentController {
   constructor(private readonly recruitmentService: RecruitmentService) {}
 
   @Post('jobs')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'CEO', 'HR')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
   createJob(@Body() dto: CreateJobDto, @Req() req: any) {
     return this.recruitmentService.createJob(dto, req.user.id);
   }
 
   @Get('candidates')
-  @Roles(
-    'SUPER_ADMIN',
-    'Super_admin',
-    'CEO',
-    'HR',
-    'FINANCE_MANAGER',
-    'IT_MANAGER',
-    'SALES_MANAGER',
-  )
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
   findCandidates() {
     return this.recruitmentService.findCandidates();
   }
@@ -45,31 +37,31 @@ export class RecruitmentController {
   @Get('jobs')
   @Roles(
     'SUPER_ADMIN',
-    'Super_admin',
     'CEO',
     'HR',
     'FINANCE_MANAGER',
     'IT_MANAGER',
     'SALES_MANAGER',
+    'EMPLOYEE',
   )
   findJobs() {
     return this.recruitmentService.findJobs();
   }
 
   @Delete('jobs/:id')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'CEO', 'HR')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
   deleteJob(@Param('id', ParseIntPipe) id: number) {
     return this.recruitmentService.deleteJob(id);
   }
 
   @Patch('jobs/:id')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'CEO', 'HR')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
   updateJob(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateJobDto) {
     return this.recruitmentService.updateJob(id, dto);
   }
 
   @Delete('candidates/:id')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'CEO', 'HR')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
   deleteCandidate(@Param('id', ParseIntPipe) id: number) {
     return this.recruitmentService.deleteCandidate(id);
   }

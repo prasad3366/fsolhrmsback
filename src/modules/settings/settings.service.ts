@@ -71,7 +71,15 @@ export class SettingsService {
       const permissions = await this.prisma.rolePermission.findMany();
 
       if (!permissions || permissions.length === 0) {
-        const defaultRoles = ['HR', 'FINANCE', 'MANAGER', 'EMPLOYEE'];
+        const defaultRoles = [
+          'SUPER_ADMIN',
+          'CEO',
+          'HR',
+          'FINANCE_MANAGER',
+          'IT_MANAGER',
+          'SALES_MANAGER',
+          'EMPLOYEE',
+        ];
         const defaultModules = [
           'Recruitment',
           'Training',
@@ -84,11 +92,11 @@ export class SettingsService {
             roleName,
             moduleName,
             canView: true,
-            canCreate: roleName === 'HR',
-            canEdit: roleName === 'HR',
-            canDelete: roleName === 'HR',
-            canApprove: roleName === 'HR' || roleName === 'MANAGER',
-            canExport: roleName === 'HR' || roleName === 'FINANCE',
+            canCreate: ['SUPER_ADMIN', 'CEO', 'HR'].includes(roleName),
+            canEdit: ['SUPER_ADMIN', 'CEO', 'HR'].includes(roleName),
+            canDelete: ['SUPER_ADMIN', 'CEO', 'HR'].includes(roleName),
+            canApprove: ['SUPER_ADMIN', 'CEO', 'HR'].includes(roleName),
+            canExport: ['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER'].includes(roleName),
           })),
         );
 

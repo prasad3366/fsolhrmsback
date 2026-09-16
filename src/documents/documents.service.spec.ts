@@ -17,7 +17,7 @@ describe('DocumentsService', () => {
       },
       employeeDocument: {
         findMany: jest.fn(),
-        upsert: jest.fn(),
+        create: jest.fn(),
         updateMany: jest.fn(),
         update: jest.fn(),
       },
@@ -61,13 +61,18 @@ describe('DocumentsService', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
-  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('returns all statuses for %s management visibility', async (role) => {
-    prisma.employeeDocument.findMany.mockResolvedValue([]);
+  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('returns all persisted statuses for %s management visibility', async (role) => {
+    const persistedDocuments = [
+      { id: 1, status: DocumentStatus.PENDING },
+      { id: 2, status: DocumentStatus.APPROVED },
+      { id: 3, status: DocumentStatus.REJECTED },
+    ];
+    prisma.employeeDocument.findMany.mockResolvedValue(persistedDocuments);
 
-    await service.getDocuments(undefined, role);
+    await expect(service.getDocuments(42, role)).resolves.toEqual(persistedDocuments);
 
     expect(prisma.employeeDocument.findMany).toHaveBeenCalledWith({
-      where: {},
+      where: { employeeId: 42 },
       include: { employee: true, documentType: true },
     });
   });
@@ -110,9 +115,9 @@ describe('DocumentsService', () => {
     await expect(service.uploadMultiple(1, ['1', '1'], files)).rejects.toThrow(BadRequestException);
   });
 
-  it('upserts valid documents and resets status to pending', async () => {
+  it('creates valid documents and resets status to pending', async () => {
     prisma.employee.findUnique.mockResolvedValue({ id: 1 });
-    prisma.employeeDocument.upsert.mockResolvedValue({ id: 10 });
+    prisma.employeeDocument.create.mockResolvedValue({ id: 10 });
 
     const files = [
       { originalname: 'a.pdf', mimetype: 'application/pdf', buffer: Buffer.from('a') },
@@ -120,15 +125,15 @@ describe('DocumentsService', () => {
     ] as any[];
 
     await expect(service.uploadMultiple(1, ['1', '2'], files)).resolves.toHaveLength(2);
-    expect(prisma.employeeDocument.upsert).toHaveBeenCalledTimes(2);
-    expect(prisma.employeeDocument.upsert.mock.calls[0][0].update.status).toBe(DocumentStatus.PENDING);
-    expect(prisma.employeeDocument.upsert.mock.calls[0][0].where.employeeId_documentTypeId).toEqual({ employeeId: 1, documentTypeId: 1 });
-    expect(prisma.employeeDocument.upsert.mock.calls[1][0].where.employeeId_documentTypeId).toEqual({ employeeId: 1, documentTypeId: 2 });
+    expect(prisma.employeeDocument.create).toHaveBeenCalledTimes(2);
+    expect(prisma.employeeDocument.create.mock.calls[0][0].data.status).toBe(DocumentStatus.PENDING);
+    expect(prisma.employeeDocument.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ employeeId: 1, documentTypeId: 1 }));
+    expect(prisma.employeeDocument.create.mock.calls[1][0].data).toEqual(expect.objectContaining({ employeeId: 1, documentTypeId: 2 }));
   });
 
   it('keeps duplicate filenames associated with their distinct document types', async () => {
     prisma.employee.findUnique.mockResolvedValue({ id: 1 });
-    prisma.employeeDocument.upsert.mockResolvedValue({ id: 10 });
+    prisma.employeeDocument.create.mockResolvedValue({ id: 10 });
     const files = [
       { originalname: 'document.pdf', mimetype: 'application/pdf', buffer: Buffer.from('experience') },
       { originalname: 'document.pdf', mimetype: 'application/pdf', buffer: Buffer.from('payslip') },
@@ -136,10 +141,10 @@ describe('DocumentsService', () => {
 
     await service.uploadMultiple(1, ['11', '12'], files);
 
-    expect(prisma.employeeDocument.upsert.mock.calls.map((call: any[]) => ({
-      key: call[0].where.employeeId_documentTypeId,
-      fileName: call[0].create.fileName,
-      fileData: call[0].create.fileData.toString(),
+    expect(prisma.employeeDocument.create.mock.calls.map((call: any[]) => ({
+      key: { employeeId: call[0].data.employeeId, documentTypeId: call[0].data.documentTypeId },
+      fileName: call[0].data.fileName,
+      fileData: call[0].data.fileData.toString(),
     }))).toEqual([
       { key: { employeeId: 1, documentTypeId: 11 }, fileName: 'document.pdf', fileData: 'experience' },
       { key: { employeeId: 1, documentTypeId: 12 }, fileName: 'document.pdf', fileData: 'payslip' },

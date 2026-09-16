@@ -19,7 +19,7 @@ import { UpdateSystemSettingsDto } from './dto/update-system-settings.dto';
 import { SettingsService } from './settings.service';
 import { AttendancePolicyService } from './services/attendance-policy.service';
 import { LeavePolicyService } from './services/leave-policy.service';
-import { HolidayService } from './services/holiday.service';
+import { HolidaysService } from '../../holidays/holidays.service';
 import { SecurityPolicyService } from './services/security-policy.service';
 import { WorkflowPolicyService } from './services/workflow-policy.service';
 import {
@@ -32,15 +32,17 @@ import {
   UpsertLeavePolicyDto,
 } from './dto/policy.dto';
 
+const ORGANIZATION_MANAGEMENT_ROLES = ['SUPER_ADMIN', 'Super_admin', 'CEO', 'HR'];
+
 @Controller('settings')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('SUPER_ADMIN', 'Super_admin')
+@Roles(...ORGANIZATION_MANAGEMENT_ROLES)
 export class SettingsController {
   constructor(
     private readonly settingsService: SettingsService,
     private readonly attendancePolicy: AttendancePolicyService,
     private readonly leavePolicy: LeavePolicyService,
-    private readonly holidayService: HolidayService,
+    private readonly holidaysService: HolidaysService,
     private readonly securityPolicy: SecurityPolicyService,
     private readonly workflowPolicy: WorkflowPolicyService,
   ) {}
@@ -91,66 +93,78 @@ export class SettingsController {
   }
 
   @Get('attendance')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   getAttendancePolicy() { return this.attendancePolicy.getPolicy(); }
 
   @Patch('attendance')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   updateAttendancePolicy(@Body() dto: UpdateAttendancePolicyDto, @Req() req: any) { return this.attendancePolicy.updatePolicy(dto, req.user); }
 
   @Get('leave')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   getLeavePolicies() { return this.leavePolicy.getPolicies(); }
 
   @Post('leave')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   upsertLeavePolicy(@Body() dto: UpsertLeavePolicyDto, @Req() req: any) { return this.leavePolicy.upsertPolicy(dto, req.user); }
 
   @Delete('leave/:id')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   deleteLeavePolicy(@Param('id', ParseIntPipe) id: number) { return this.leavePolicy.deletePolicy(id); }
 
   @Get('holidays')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
-  getHolidays() { return this.holidayService.getHolidays(); }
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
+  getHolidays() { return this.holidaysService.getAllHolidays(); }
 
   @Post('holidays')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
-  createHoliday(@Body() dto: CreateHolidayPolicyDto, @Req() req: any) { return this.holidayService.createHoliday(dto, req.user); }
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
+  createHoliday(@Body() dto: CreateHolidayPolicyDto) {
+    return this.holidaysService.createHoliday({
+      name: dto.title,
+      date: dto.date,
+      description: dto.description,
+      isOptional: dto.isOptional,
+    }, {
+      title: dto.title,
+      branchId: dto.branchId,
+    });
+  }
 
   @Delete('holidays/:id')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
-  deleteHoliday(@Param('id', ParseIntPipe) id: number) { return this.holidayService.deleteHoliday(id); }
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
+  deleteHoliday(@Param('id', ParseIntPipe) id: number) {
+    return this.holidaysService.deleteHoliday(id, true);
+  }
 
   @Get('employee-lifecycle')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   getEmployeeLifecycle() { return this.settingsService.getEmployeeLifecycle(); }
 
   @Patch('employee-lifecycle')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   updateEmployeeLifecycle(@Body() dto: UpdateEmployeeSettingDto, @Req() req: any) { return this.settingsService.updateEmployeeLifecycle(dto, req.user); }
 
   @Get('security')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   getSecurityPolicy() { return this.securityPolicy.getPolicy(); }
 
   @Patch('security')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   updateSecurityPolicy(@Body() dto: UpdateSecurityPolicyDto, @Req() req: any) { return this.securityPolicy.updatePolicy(dto, req.user); }
 
   @Get('workflows')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   getWorkflows() { return this.workflowPolicy.getWorkflows(); }
 
   @Patch('workflows')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   updateWorkflow(@Body() dto: UpdateWorkflowDto, @Req() req: any) { return this.workflowPolicy.updateWorkflow(dto, req.user); }
 
   @Get('notifications')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   getNotifications() { return this.settingsService.getNotifications(); }
 
   @Patch('notifications')
-  @Roles('SUPER_ADMIN', 'Super_admin', 'HR')
+  @Roles(...ORGANIZATION_MANAGEMENT_ROLES)
   updateNotifications(@Body() dto: UpdateNotificationSettingDto, @Req() req: any) { return this.settingsService.updateNotifications(dto, req.user); }
 }

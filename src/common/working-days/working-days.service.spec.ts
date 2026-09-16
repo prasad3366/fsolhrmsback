@@ -57,6 +57,29 @@ describe('WorkingDaysService', () => {
     await expect(salesService.service.getWorkingDates(7, [salesSaturday])).resolves.toEqual([]);
   });
 
+  it('excludes a holiday regardless of its stored location', async () => {
+    const holidayDate = date(2026, 9, 4);
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 7,
+          city: 'Pune',
+          team: null,
+        }),
+      },
+    } as any;
+    const holidayService = {
+      isHoliday: jest.fn().mockResolvedValue({
+        date: holidayDate,
+        location: 'Mumbai',
+      }),
+    } as any;
+    const service = new WorkingDaysService(prisma, holidayService);
+
+    await expect(service.getWorkingDates(7, [holidayDate])).resolves.toEqual([]);
+    expect(holidayService.isHoliday).toHaveBeenCalledWith(holidayDate);
+  });
+
   it('uses the Asia/Kolkata weekday at a UTC date boundary', async () => {
     const { service } = createService(null);
 

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   ForbiddenException,
@@ -13,8 +14,9 @@ import {
   AuthorizationUser,
 } from '../common/authorization/authorization.service';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
-import { Prisma } from '@prisma/client';
+import { ActionType, NotificationEntityType, Prisma } from '@prisma/client';
 import { LeaveDurationType } from '@prisma/client';
+import { NotificationService } from '../modules/notifications/notification.service';
 
 const MAX_LEAVE_TEXT_LENGTH = 500;
 
@@ -30,6 +32,7 @@ export class LeaveService {
       prisma,
       holidayService,
     ),
+    private readonly notificationService: NotificationService = new NotificationService(prisma),
   ) {}
 
   // ================= CALCULATE DAYS =================
@@ -64,6 +67,15 @@ export class LeaveService {
     return workingDates.length;
   }
 
+  private parseLeaveDate(value: string): Date {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const [year, month, day] = value.split('-').map(Number);
+      return new Date(year, month - 1, day);
+    }
+
+    return new Date(value);
+  }
+
   private isSerializationConflict(error: unknown): boolean {
     return (
       typeof error === 'object' &&
@@ -79,32 +91,119 @@ export class LeaveService {
     actorEmployeeId: number,
     actorRole: string,
   ): Promise<boolean> {
-    const role = String(actorRole ?? '').toUpperCase();
-    if (role === 'SUPER_ADMIN') return true;
-    if (leaveEmployeeId === actorEmployeeId) return false;
+    return this.authorizationService.canApproveOrRejectRequest(
+      {
+        id: actorEmployeeId,
+        role: actorRole,
+        employeeId: actorEmployeeId,
+      },
+      leaveEmployeeId,
+    );
+  }
 
-    const target = await tx.employee.findUnique({
-      where: { id: leaveEmployeeId },
-      select: { id: true, user: { select: { role: true } }, team: { select: { name: true } } },
+  private async resolveLeaveApprovalPool(targetEmployeeId: number) {
+    const targetEmployee = await this.prisma.employee.findUnique({
+      where: { id: targetEmployeeId },
+      include: { user: true },
     });
-    if (!target) return false;
 
-    const targetRole = String(target.user?.role ?? '').toUpperCase();
-    if (
-      ['HR', 'CEO', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER'].includes(targetRole)
-    ) {
-      return false;
+    if (!targetEmployee) {
+      return [] as Array<{ id: number; userId: number; role: string }>;
     }
 
-    if (role === 'HR') return true;
+    const eligibleApprovers = await this.prisma.employee.findMany({
+      include: { user: true },
+      where: {
+        user: {
+          role: {
+            in: ['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER', 'HR', 'SUPER_ADMIN', 'CEO'],
+          },
+        },
+      },
+    });
 
-    if (role !== 'IT_MANAGER' && role !== 'SALES_MANAGER') return false;
-    const expectedTeam = role === 'IT_MANAGER' ? 'IT' : 'SALES';
-    return String(target.team?.name ?? '').toUpperCase() === expectedTeam &&
-      await this.authorizationService.canAccessEmployee(
-        { id: actorEmployeeId, role, employeeId: actorEmployeeId },
-        leaveEmployeeId,
+    const approvedApprovers: Array<{ id: number; userId: number; role: string }> = [];
+
+    for (const approver of eligibleApprovers) {
+      const actor = {
+        id: approver.userId ?? approver.id,
+        role: approver.user?.role ?? '',
+        employeeId: approver.id,
+      };
+
+      const allowed = await this.authorizationService.canApproveOrRejectRequest(
+        actor,
+        targetEmployeeId,
       );
+
+      if (allowed && approver.userId) {
+        approvedApprovers.push({
+          id: approver.id,
+          userId: approver.userId,
+          role: approver.user.role,
+        });
+      }
+    }
+
+    return approvedApprovers;
+  }
+
+  private async notifyLeaveApprovers(leaveId: number, targetEmployeeId: number) {
+    const approvers = await this.resolveLeaveApprovalPool(targetEmployeeId);
+
+    for (const approver of approvers) {
+      try {
+        await this.notificationService.createActionItem({
+          recipientUserId: approver.userId,
+          entityType: NotificationEntityType.LEAVE,
+          entityId: leaveId,
+          actionType: ActionType.REVIEW,
+        });
+      } catch (error) {
+        if (!(error instanceof ConflictException)) {
+          throw error;
+        }
+      }
+
+      await this.notificationService.createNotification({
+        recipientUserId: approver.userId,
+        entityType: NotificationEntityType.LEAVE,
+        entityId: leaveId,
+        title: 'Leave request pending approval',
+        message: `A leave request requires your review and decision.`,
+      });
+    }
+  }
+
+  private async notifyLeaveDecision(
+    leaveId: number,
+    requesterUserId: number,
+    decision: 'APPROVED' | 'REJECTED',
+    approverEmployeeId: number,
+    approverRole: string,
+  ) {
+    await this.notificationService.resolveActionItemsForEntity({
+      entityType: NotificationEntityType.LEAVE,
+      entityId: leaveId,
+    });
+
+    const approverUser = await this.prisma.employee.findUnique({
+      where: { id: approverEmployeeId },
+      include: { user: true },
+    });
+
+    const actorUserId = approverUser?.userId ?? approverEmployeeId;
+    const decisionText = decision === 'APPROVED' ? 'approved' : 'rejected';
+    const decisionReason = decision === 'APPROVED' ? 'has been approved' : 'has been rejected';
+
+    await this.notificationService.createNotification({
+      recipientUserId: requesterUserId,
+      entityType: NotificationEntityType.LEAVE,
+      entityId: leaveId,
+      actorUserId: actorUserId,
+      title: `Leave request ${decisionText}`,
+      message: `Your leave request was ${decisionReason} by ${approverRole}.`,
+    });
   }
 
   // ================= APPLY LEAVE =================
@@ -120,8 +219,8 @@ export class LeaveService {
       throw new BadRequestException('Reason is too long');
     }
 
-    const start = new Date(dto.startDate);
-    const end = new Date(dto.endDate);
+    const start = this.parseLeaveDate(dto.startDate);
+    const end = this.parseLeaveDate(dto.endDate);
 
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
       throw new BadRequestException('Invalid date format');
@@ -136,8 +235,10 @@ export class LeaveService {
     }
     const yearStart = getFinancialYearStart(start);
 
+    let createdLeave: any;
+
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      createdLeave = await this.prisma.$transaction(async (tx) => {
         const employee = await tx.employee.findUnique({
           where: { id: employeeId },
           include: { user: true },
@@ -194,11 +295,14 @@ export class LeaveService {
         }
 
         const available = balance.allocated + balance.carryForward - balance.used;
-
-        const isLossOfPay = available < totalDays && leavePolicy?.isLossOfPay === true;
+        const allowsLossOfPay = leavePolicy?.isLossOfPay === true;
+        const isLossOfPay = available < totalDays && allowsLossOfPay;
         if (available < totalDays && !isLossOfPay) {
           throw new BadRequestException('Insufficient leave balance');
         }
+
+        const paidLeaveDays = Math.min(totalDays, Math.max(0, available));
+        const lopDays = isLossOfPay ? Math.max(totalDays - paidLeaveDays, 0) : 0;
 
         const requiresMedical = leavePolicy?.requiresDocument ?? leaveType.requiresMedical;
         if (requiresMedical && totalDays > 2 && !dto.medicalCertificate) {
@@ -215,6 +319,8 @@ export class LeaveService {
             endDate: end,
             durationType: duration,
             totalDays,
+            paidLeaveDays,
+            lopDays,
             reason: dto.reason,
             yearStart,
             medicalCertificate: dto.medicalCertificate,
@@ -224,6 +330,17 @@ export class LeaveService {
           },
         });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+      const requester = await this.prisma.employee.findUnique({
+        where: { id: employeeId },
+        select: { userId: true },
+      });
+
+      if (requester?.userId) {
+        await this.notifyLeaveApprovers(createdLeave.id, employeeId);
+      }
+
+      return createdLeave;
     } catch (error) {
       if (this.isSerializationConflict(error)) {
         throw new BadRequestException('Leave request conflicts with another request');
@@ -275,9 +392,23 @@ export class LeaveService {
           throw new BadRequestException('Insufficient leave balance');
         }
 
+        const paidLeaveDays = isLop
+          ? Math.min(leave.totalDays, Math.max(0, available))
+          : Number(leave.paidLeaveDays ?? leave.totalDays ?? 0);
+        const lopDays = Math.max(leave.totalDays - paidLeaveDays, 0);
+
+        const decisionAt = new Date();
         const transition = await tx.leave.updateMany({
           where: { id: leaveId, status: 'PENDING' },
-          data: { status: 'APPROVED' },
+          data: {
+            status: 'APPROVED',
+            decisionByEmployeeId: approverEmployeeId,
+            decisionByRole: approverRole,
+            decisionAt,
+            decisionReason: leave.remarks ?? null,
+            paidLeaveDays,
+            lopDays,
+          },
         });
 
         if (transition.count !== 1) {
@@ -292,7 +423,7 @@ export class LeaveService {
               yearStart: leave.yearStart,
             },
           },
-          data: { used: { increment: leave.totalDays } },
+          data: { used: { increment: paidLeaveDays } },
         });
 
         return tx.leave.findUnique({
@@ -300,6 +431,21 @@ export class LeaveService {
           include: { employee: true, leaveType: true },
         });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+      const requester = await this.prisma.employee.findUnique({
+        where: { id: approvedLeave?.employeeId ?? 0 },
+        select: { userId: true },
+      });
+
+      if (requester?.userId) {
+        await this.notifyLeaveDecision(
+          leaveId,
+          requester.userId,
+          'APPROVED',
+          approverEmployeeId,
+          approverRole,
+        );
+      }
 
       return approvedLeave;
     } catch (error) {
@@ -325,8 +471,10 @@ export class LeaveService {
       throw new BadRequestException('Rejection remarks are too long');
     }
 
+    let rejectedLeave: any;
+
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      rejectedLeave = await this.prisma.$transaction(async (tx) => {
         const leave = await tx.leave.findUnique({ where: { id } });
         if (!leave) throw new NotFoundException('Leave not found');
         if (leave.status !== 'PENDING') throw new BadRequestException('Leave already processed');
@@ -337,13 +485,38 @@ export class LeaveService {
           throw new BadRequestException('Unauthorized to reject leave');
         }
 
+        const decisionAt = new Date();
         const transition = await tx.leave.updateMany({
           where: { id, status: 'PENDING' },
-          data: { status: 'REJECTED', remarks },
+          data: {
+            status: 'REJECTED',
+            remarks,
+            decisionByEmployeeId: approverEmployeeId,
+            decisionByRole: approverRole,
+            decisionAt,
+            decisionReason: remarks,
+          },
         });
         if (transition.count !== 1) throw new BadRequestException('Leave already processed');
         return tx.leave.findUnique({ where: { id }, include: { employee: true, leaveType: true } });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+      const requester = await this.prisma.employee.findUnique({
+        where: { id: rejectedLeave?.employeeId ?? 0 },
+        select: { userId: true },
+      });
+
+      if (requester?.userId) {
+        await this.notifyLeaveDecision(
+          id,
+          requester.userId,
+          'REJECTED',
+          approverEmployeeId,
+          approverRole,
+        );
+      }
+
+      return rejectedLeave;
     } catch (error) {
       if (this.isSerializationConflict(error)) {
         throw new BadRequestException('Rejection conflicts with another request');
@@ -374,15 +547,19 @@ export class LeaveService {
         });
         if (transition.count !== 1) throw new BadRequestException('Leave already processed');
 
-        if (leave.status === 'APPROVED' && !leave.isLossOfPay) {
+        if (leave.status === 'APPROVED') {
+          const paidLeaveDays = Number(leave.paidLeaveDays ?? leave.totalDays ?? 0);
+          if (paidLeaveDays <= 0) {
+            return tx.leave.findUnique({ where: { id }, include: { employee: true, leaveType: true } });
+          }
           const balance = await tx.leaveBalance.updateMany({
             where: {
               employeeId: leave.employeeId,
               leaveTypeId: leave.leaveTypeId,
               yearStart: leave.yearStart,
-              used: { gte: leave.totalDays },
+              used: { gte: paidLeaveDays },
             },
-            data: { used: { decrement: leave.totalDays } },
+            data: { used: { decrement: paidLeaveDays } },
           });
           if (balance.count !== 1) throw new BadRequestException('Leave balance cannot be restored');
         }
@@ -454,12 +631,14 @@ export class LeaveService {
     const normalizedRole = String(role ?? '').toUpperCase();
     const where: any = {
       ...(normalizedRole === 'EMPLOYEE' && { employeeId }),
-      ...(normalizedRole === 'HR' && { employeeId: { not: employeeId } }),
+      ...(['HR', 'CEO'].includes(normalizedRole) && { employeeId: { not: employeeId } }),
     };
 
     if (
       user &&
-      (normalizedRole === 'IT_MANAGER' || normalizedRole === 'SALES_MANAGER')
+      (normalizedRole === 'IT_MANAGER' ||
+        normalizedRole === 'SALES_MANAGER' ||
+        normalizedRole === 'FINANCE_MANAGER')
     ) {
       const managedTeamWhere = {
         employee: { team: { managerId: Number(user.employeeId) } },
@@ -529,10 +708,10 @@ export class LeaveService {
     }
 
     const where: any = { status: 'PENDING' };
-    if (normalizedRole === 'HR') {
+    if (normalizedRole === 'HR' || normalizedRole === 'CEO') {
       where.employeeId = { not: Number(user?.employeeId) };
     }
-    if (['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole)) {
+    if (['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'].includes(normalizedRole)) {
       where.employee = { team: { managerId: Number(user?.employeeId) } };
       where.employeeId = { not: Number(user?.employeeId) };
     }
@@ -551,10 +730,10 @@ export class LeaveService {
     }
 
     const where: any = {};
-    if (normalizedRole === 'HR') {
+    if (normalizedRole === 'HR' || normalizedRole === 'CEO') {
       where.employeeId = { not: Number(user?.employeeId) };
     }
-    if (['IT_MANAGER', 'SALES_MANAGER'].includes(normalizedRole)) {
+    if (['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'].includes(normalizedRole)) {
       where.employee = { team: { managerId: Number(user?.employeeId) } };
       where.employeeId = { not: Number(user?.employeeId) };
     }

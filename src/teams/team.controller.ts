@@ -35,31 +35,31 @@ export class TeamController {
   constructor(private teamService: TeamService) {}
 
   @Post()
-  @Roles('SUPER_ADMIN', 'CEO')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
   createTeam(@Req() req: any, @Body() dto: CreateTeamDto) {
     return this.teamService.createTeam(dto, req.user);
   }
 
   @Get()
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER')
   getAllTeams(@Req() req: any) {
     return this.teamService.getAllTeams(req.user);
   }
 
   @Post(':id/members')
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER')
   addMembers(@Req() req: any, @Param('id', PositiveIntPipe) id: number, @Body() dto: AddMembersDto) {
     return this.teamService.addMembers(id, dto.employeeIds, req.user);
   }
 
   @Delete(':id/members')
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER')
   removeMembers(@Req() req: any, @Param('id', PositiveIntPipe) id: number, @Body() dto: AddMembersDto) {
     return this.teamService.removeMembers(id, dto.employeeIds, req.user);
   }
 
   @Delete(':id/members/:employeeId')
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER')
   removeMember(
     @Req() req: any,
     @Param('id', PositiveIntPipe) id: number,
@@ -69,13 +69,13 @@ export class TeamController {
   }
 
   @Delete(':id')
-  @Roles('SUPER_ADMIN', 'CEO')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
   deleteTeam(@Req() req: any, @Param('id', PositiveIntPipe) id: number) {
     return this.teamService.deleteTeam(id, req.user);
   }
 
   @Get('my-team')
-  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER', 'EMPLOYEE')
   getMyTeam(@Req() req: any) {
     const employeeId = req.user?.employeeId;
     if (!employeeId) {

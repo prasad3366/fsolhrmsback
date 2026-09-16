@@ -11,6 +11,13 @@ describe('WFH authorization', () => {
   });
 
   const createPrisma = () => ({
+    user: {
+      findUnique: jest.fn().mockResolvedValue({
+        id: 1,
+        isActive: true,
+        employee: { id: 10, status: 'ACTIVE' },
+      }),
+    },
     employee: { findUnique: jest.fn() },
     team: { findMany: jest.fn(), findUnique: jest.fn() },
     wFHRequest: { findUnique: jest.fn(), findMany: jest.fn() },

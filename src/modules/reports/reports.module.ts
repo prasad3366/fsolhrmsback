@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../../auth/auth.module';
+import { AttendanceModule } from '../../attendance/attendance.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
@@ -8,7 +9,7 @@ import { WorkingDaysService } from '../../common/working-days/working-days.servi
 import { HolidaysService } from '../../holidays/holidays.service';
 
 @Module({
-  imports: [AuthModule, PrismaModule],
+  imports: [AuthModule, AttendanceModule, PrismaModule],
   controllers: [ReportsController],
   providers: [ReportsService, AuthorizationService, WorkingDaysService, HolidaysService],
   exports: [ReportsService],

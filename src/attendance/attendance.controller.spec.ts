@@ -9,6 +9,7 @@ describe('AttendanceController history queries', () => {
     getMyAttendanceForEmployee: jest.fn(),
     getTodayStatusForEmployee: jest.fn(),
     getTodayAttendance: jest.fn(),
+      canAccessEmployeeAttendance: jest.fn().mockResolvedValue(true),
     punchIn: jest.fn(),
     punchOut: jest.fn(),
   } as unknown as jest.Mocked<AttendanceService>;
@@ -21,6 +22,7 @@ describe('AttendanceController history queries', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     authorizationService.canAccessEmployee.mockResolvedValue(true);
+    service.canAccessEmployeeAttendance.mockResolvedValue(true);
     authorizationService.canAccessOrganizationWide.mockReturnValue(true);
     controller = new AttendanceController(service, authorizationService);
   });
@@ -96,6 +98,7 @@ describe('AttendanceController history queries', () => {
   it('denies a team manager outside the authorized employee scope', async () => {
     authorizationService.canAccessOrganizationWide.mockReturnValue(false);
     authorizationService.canAccessEmployee.mockResolvedValue(false);
+    service.canAccessEmployeeAttendance.mockResolvedValue(false);
 
     await expect(controller.getEmployeeMonthlyAttendance(
       { user: { id: 70, role: 'IT_MANAGER', employeeId: 10 } },

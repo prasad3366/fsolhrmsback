@@ -63,7 +63,7 @@ export class TeamService {
     }
 
     const role = this.normalizeRole(user.role);
-    const permittedRoles = ['SUPER_ADMIN', 'CEO'];
+    const permittedRoles = ['SUPER_ADMIN', 'CEO', 'HR'];
     if (!permittedRoles.includes(role)) {
       throw new ForbiddenException('Only SUPER_ADMIN and CEO may create teams');
     }
@@ -77,7 +77,7 @@ export class TeamService {
     }
 
     const manager = await this.repo.findManager(dto.managerId);
-    const validManagerRoles = ['IT_MANAGER', 'SALES_MANAGER'];
+    const validManagerRoles = ['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'];
     const managerRole = this.normalizeRole(manager?.user?.role);
 
     if (!manager || !validManagerRoles.includes(managerRole)) {
@@ -108,7 +108,7 @@ export class TeamService {
       return this.mapTeams(await this.repo.findAll());
     }
 
-    if (role === 'IT_MANAGER' || role === 'SALES_MANAGER') {
+    if (role === 'IT_MANAGER' || role === 'SALES_MANAGER' || role === 'FINANCE_MANAGER') {
       const teams = await this.repo.findByManager(Number(user.employeeId));
       return this.mapTeams(teams);
     }
@@ -165,8 +165,8 @@ export class TeamService {
     }
 
     const role = this.normalizeRole(user.role);
-    if (role !== 'SUPER_ADMIN' && role !== 'CEO') {
-      throw new ForbiddenException('Only SUPER_ADMIN and CEO may delete teams');
+    if (role !== 'SUPER_ADMIN' && role !== 'CEO' && role !== 'HR') {
+      throw new ForbiddenException('Only SUPER_ADMIN, CEO, and HR may delete teams');
     }
 
     const team = await this.repo.findById(teamId);
@@ -220,12 +220,16 @@ export class TeamService {
     }
 
     const role = this.normalizeRole(user.role);
-    if (role === 'IT_MANAGER' || role === 'SALES_MANAGER') {
+    if (role === 'IT_MANAGER' || role === 'SALES_MANAGER' || role === 'FINANCE_MANAGER') {
       const teams = await this.repo.findByManager(employeeId);
       return this.mapTeams(teams);
     }
 
     if (role === 'EMPLOYEE') {
+      if (Number(user.employeeId) !== employeeId) {
+        throw new ForbiddenException('You may only access your own team');
+      }
+
       const employee = await this.prisma.employee.findUnique({
         where: { id: employeeId },
         include: {

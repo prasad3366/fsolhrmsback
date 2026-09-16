@@ -5,11 +5,14 @@ import {
   ForbiddenException,
   forwardRef,
 } from '@nestjs/common';
+import { AttendanceStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EmployeesService } from '../employees/employees.service';
 import { RunPayrollDto } from './dto/run-payroll.dto';
 import { PayrollCalculator } from './payroll.calculator';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
+import { HolidaysService } from '../holidays/holidays.service';
+import { AttendanceService } from '../attendance/attendance.service';
 import {
   AuthorizationService,
   AuthorizationUser,
@@ -17,13 +20,22 @@ import {
 
 @Injectable()
 export class PayrollService {
+  private readonly attendanceService: AttendanceService;
+
   constructor(
     private prisma: PrismaService,
     @Inject(forwardRef(() => EmployeesService))
     private employeesService: EmployeesService,
     private authorizationService: AuthorizationService,
     private workingDaysService: WorkingDaysService,
-  ) {}
+  ) {
+    this.attendanceService = new AttendanceService(
+      this.prisma,
+      new HolidaysService(this.prisma),
+      undefined,
+      this.workingDaysService,
+    );
+  }
 
   private async calculateWorkingDays(employeeId: number, startDate: Date, endDate: Date) {
     const dates: Date[] = [];
@@ -122,34 +134,6 @@ export class PayrollService {
     return this.computePayroll(employeeId, month, year);
   }
 
-  private classifyCompletedAttendanceContribution(hours: number): number {
-    if (hours < 4) return 0;
-    if (hours < 7) return 0.5;
-    return 1;
-  }
-
-  private getAttendanceContribution(record: any): number {
-    if (!record) return 0;
-
-    const hasClockIn = record.clockIn != null;
-    const hasClockOut = record.clockOut != null;
-
-    if (!hasClockIn || !hasClockOut) {
-      return 0;
-    }
-
-    const totalHours = Number(
-      record.totalHours ??
-        ((record.clockOut.getTime() - record.clockIn.getTime()) / 3600000),
-    );
-
-    return this.classifyCompletedAttendanceContribution(Number.isFinite(totalHours) ? totalHours : 0);
-  }
-
-  private isApprovedLeave(leave: any): boolean {
-    return leave?.status === 'APPROVED';
-  }
-
   private async computePayroll(employeeId: number, month: number, year: number) {
     /* Date Range */
 
@@ -172,54 +156,54 @@ export class PayrollService {
 
     const workingDays = await this.calculateWorkingDays(employeeId, startDate, endDate);
 
-    /* 🔥 Attendance */
+    /* 🔥 Canonical attendance history */
 
-    const attendanceRecords = await this.prisma.attendanceRecord.findMany({
-      where: {
-        user: { employee: { id: employeeId } },
-        date: { gte: startDate, lte: endDate },
-      },
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { userId: true },
     });
+
+    if (!employee) {
+      throw new BadRequestException('Employee not found');
+    }
+
+    const attendanceHistoryResult = await this.attendanceService.getAttendanceHistory(
+      employee.userId,
+      month,
+      year,
+    );
+    const attendanceHistory = Array.isArray(attendanceHistoryResult)
+      ? attendanceHistoryResult
+      : attendanceHistoryResult.data;
 
     let presentDays = 0;
 
-    for (const att of attendanceRecords) {
-      presentDays += this.getAttendanceContribution(att);
+    for (const record of attendanceHistory) {
+      if (record.status === AttendanceStatus.PRESENT || record.status === AttendanceStatus.LATE) {
+        presentDays += 1;
+      } else if (record.status === AttendanceStatus.HALF_DAY) {
+        presentDays += 0.5;
+      }
     }
 
-    /* 🔥 Approved Leaves */
-
-    const leaves = await this.prisma.leave.findMany({
+    const approvedLeaveDays = await this.prisma.leave.aggregate({
       where: {
         employeeId,
         status: 'APPROVED',
         startDate: { lte: endDate },
         endDate: { gte: startDate },
       },
+      _sum: { paidLeaveDays: true, lopDays: true },
     });
 
-    let approvedLeaveDays = 0;
-
-    for (const leave of leaves) {
-      if (!this.isApprovedLeave(leave)) continue;
-
-      // Prorate leaves spanning a month boundary so only the days
-      // that fall inside this payroll month are credited.
-      const overlapStart = leave.startDate < startDate ? startDate : leave.startDate;
-      const overlapEnd = leave.endDate > endDate ? endDate : leave.endDate;
-      const overlapDays =
-        Math.floor((overlapEnd.getTime() - overlapStart.getTime()) / 86400000) + 1;
-      const leaveSpanDays =
-        Math.floor((leave.endDate.getTime() - leave.startDate.getTime()) / 86400000) + 1;
-
-      approvedLeaveDays += leave.totalDays * (overlapDays / leaveSpanDays);
-    }
+    const paidLeaveDays = Number(approvedLeaveDays._sum?.paidLeaveDays ?? 0);
+    const leaveLopDays = Number(approvedLeaveDays._sum?.lopDays ?? 0);
 
     /* 🔥 FINAL LOGIC */
 
-    const payableDays = presentDays + approvedLeaveDays;
-
-    const lopDays = Math.max(workingDays - payableDays, 0);
+    const payableDays = presentDays + paidLeaveDays;
+    const attendanceLopDays = Math.max(workingDays - payableDays - leaveLopDays, 0);
+    const lopDays = leaveLopDays + attendanceLopDays;
 
     /* 🔥 Calculation */
 

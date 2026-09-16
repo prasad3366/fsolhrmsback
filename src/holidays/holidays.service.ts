@@ -97,7 +97,10 @@ export class HolidaysService {
   }
 
   // ✅ Create Holiday
-  async createHoliday(data: CreateHolidayDto) {
+  async createHoliday(
+    data: CreateHolidayDto,
+    metadata?: { title?: string; branchId?: number },
+  ) {
     this.validateFields(data as unknown as Record<string, unknown>, ['name', 'date']);
     const date = this.normalizeBusinessDate(data.date);
     await this.ensureDatePeriodUnlocked(date);
@@ -109,6 +112,8 @@ export class HolidaysService {
           description: data.description,
           isOptional: data.isOptional ?? false,
           location: data.location,
+          ...(metadata?.title !== undefined && { title: metadata.title }),
+          ...(metadata?.branchId !== undefined && { branchId: metadata.branchId }),
         },
       });
     } catch (error) {
@@ -131,6 +136,10 @@ export class HolidaysService {
       },
       orderBy: { date: 'asc' },
     });
+  }
+
+  async getAllHolidays() {
+    return this.prisma.holiday.findMany({ orderBy: { date: 'asc' } });
   }
 
   async getHolidayById(id: number) {
@@ -164,7 +173,7 @@ export class HolidaysService {
   }
 
   // ✅ Delete Holiday
-  async deleteHoliday(id: number) {
+  async deleteHoliday(id: number, returnDeleted = false) {
     const existingHoliday = await this.prisma.holiday.findUnique({ where: { id } });
     if (!existingHoliday) throw new NotFoundException('Holiday not found');
     await this.ensureDatePeriodUnlocked(existingHoliday.date);
@@ -176,7 +185,7 @@ export class HolidaysService {
       this.rethrowNotFound(error);
     }
 
-    return { message: 'Holiday deleted successfully' };
+    return returnDeleted ? existingHoliday : { message: 'Holiday deleted successfully' };
   }
 
   // ✅ Employee Holiday List

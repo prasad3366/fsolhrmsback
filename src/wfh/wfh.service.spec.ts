@@ -17,6 +17,9 @@ describe('WfhService date and working-day rules', () => {
         create: jest.fn().mockResolvedValue({ id: 1 }),
         update: jest.fn(),
       },
+      actionItem: {
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
     } as any;
     prisma.$transaction = jest.fn(async (callback: (tx: any) => unknown) => callback(prisma));
     const holidayService = {
