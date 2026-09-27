@@ -1,0 +1,4 @@
+ALTER TABLE "Payroll"
+  ADD COLUMN "conveyance" DOUBLE PRECISION,
+  ADD COLUMN "otherDeduction" DOUBLE PRECISION,
+  ADD COLUMN "paidLeaveDays" DOUBLE PRECISION;

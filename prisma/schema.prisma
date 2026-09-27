@@ -462,7 +462,7 @@ model Leave {
 model Holiday {
   id          Int      @id @default(autoincrement())
   name        String
-  date        DateTime
+  date        DateTime @db.Date
   description String?
   isOptional  Boolean  @default(false)
   location    String?
@@ -541,18 +541,21 @@ model Payroll {
   /// Earnings
   basic            Float
   hra              Float
+  conveyance       Float?
+  specialAllowance Float              @default(0)
+  otherAllowance   Float              @default(0)
   /// Deductions
   pf               Float
   pt               Float
+  leaveDeduction   Float              @default(0)
+  otherDeduction   Float?
   deductions       Float
   /// Totals
   grossSalary      Float
   netSalary        Float
   status           PayrollStatus       @default(DRAFT)
   createdAt        DateTime            @default(now())
-  leaveDeduction   Float               @default(0)
-  otherAllowance   Float               @default(0)
-  specialAllowance Float               @default(0)
+  paidLeaveDays    Float?
   employee         Employee            @relation(fields: [employeeId], references: [id])
   salary           EmployeeSalary      @relation(fields: [salaryId], references: [id])
   others           PayrollAdjustment[]

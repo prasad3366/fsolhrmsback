@@ -584,6 +584,152 @@ export class AttendanceService {
     });
   }
 
+  async addMissedAttendance(
+    dto: {
+      employeeId: number;
+      date: string;
+      clockIn: string;
+      clockOut: string;
+      reason?: string;
+    },
+    actor: AuthorizationUser,
+    ipAddress?: string,
+  ) {
+    const actorRole = String(actor?.role ?? '').toUpperCase();
+    if (!['SUPER_ADMIN', 'CEO', 'HR'].includes(actorRole)) {
+      throw new ForbiddenException('Access denied');
+    }
+
+    if (!this.authorizationService || typeof this.authorizationService.canAccessOrganizationWide !== 'function') {
+      throw new ForbiddenException('Access denied');
+    }
+
+    if (!this.authorizationService.canAccessOrganizationWide(actor, 'attendance')) {
+      throw new ForbiddenException('Access denied');
+    }
+
+    const employeeId = Number(dto.employeeId);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+      throw new BadRequestException('Invalid employee ID');
+    }
+
+    if (!dto.date || !dto.clockIn || !dto.clockOut) {
+      throw new BadRequestException('Date, clock-in, and clock-out are required');
+    }
+
+    const reason = typeof dto.reason === 'string' ? dto.reason.trim() : '';
+    if (!reason) {
+      throw new BadRequestException('A meaningful reason is required');
+    }
+
+    const targetDate = this.normalizeBusinessDateInput(dto.date);
+    const clockIn = new Date(dto.clockIn);
+    const clockOut = new Date(dto.clockOut);
+
+    if (Number.isNaN(clockIn.getTime()) || Number.isNaN(clockOut.getTime())) {
+      throw new BadRequestException('Clock-in and clock-out must be valid ISO timestamps');
+    }
+
+    const employee = await this.prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: {
+        id: true,
+        userId: true,
+        status: true,
+        user: { select: { email: true } },
+      },
+    });
+
+    if (!employee) {
+      throw new NotFoundException('Employee not found');
+    }
+
+    if (employee.status !== EmployeeStatus.ACTIVE) {
+      throw new ForbiddenException('Employee is inactive');
+    }
+
+    const workingDates = await this.workingDaysService.getWorkingDates(employee.id, [targetDate]);
+    if (!workingDates.some((date) => getBusinessDateKey(date) === getBusinessDateKey(targetDate))) {
+      throw new BadRequestException('Missed attendance can only be recorded for a working day.');
+    }
+
+    const leaveRecord = this.prisma.leave?.findFirst
+      ? await this.prisma.leave.findFirst({
+          where: {
+            employeeId: employee.id,
+            status: 'APPROVED',
+            startDate: { lte: targetDate },
+            endDate: { gte: targetDate },
+          },
+        })
+      : null;
+
+    if (leaveRecord) {
+      throw new ConflictException('Cannot add missed attendance for a date with approved leave.');
+    }
+
+    const totalHours = (clockOut.getTime() - clockIn.getTime()) / 3600000;
+    if (!Number.isFinite(totalHours) || totalHours <= 0) {
+      throw new BadRequestException('Clock-out must be after clock-in');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const existingRecord = await tx.attendanceRecord.findUnique({
+        where: { userId_date: { userId: employee.userId, date: targetDate } },
+      });
+
+      const data = {
+        userId: employee.userId,
+        userEmail: employee.user?.email ?? '',
+        date: targetDate,
+        clockIn,
+        clockOut,
+        totalHours,
+        status: this.classifyCompletedDuration(totalHours),
+        ipAddress,
+        notes: reason,
+      };
+
+      try {
+        const record = existingRecord
+          ? await tx.attendanceRecord.update({
+              where: { id: existingRecord.id },
+              data,
+            })
+          : await tx.attendanceRecord.create({
+              data,
+            });
+
+        const previousPayload = existingRecord ? { ...existingRecord, reason: existingRecord.notes ?? null } : null;
+        const newPayload = { ...record, reason };
+
+        await tx.auditLog.create({
+          data: {
+            userId: actor?.id ?? null,
+            userEmail: actor?.email ?? employee.user?.email ?? 'system',
+            action: 'MISSED_ATTENDANCE_ADDED',
+            module: 'ATTENDANCE',
+            ipAddress,
+            previousVal: previousPayload ? JSON.stringify(previousPayload) : null,
+            newVal: JSON.stringify(newPayload),
+          },
+        });
+
+        return {
+          record,
+          message: existingRecord
+            ? 'Missed attendance updated successfully.'
+            : 'Missed attendance added successfully.',
+        };
+      } catch (error: any) {
+        if (error?.code === 'P2002') {
+          throw new ConflictException('Attendance has already been corrected for this employee and date.');
+        }
+        throw error;
+      }
+    });
+  }
+
   async requestRegularization(dto: any, userId: number, userEmail: string) {
     const requestedClockIn = new Date(dto.requestedClockIn);
     const attendanceDate = this.attendanceDate(requestedClockIn);
@@ -705,6 +851,11 @@ export class AttendanceService {
     punchInLocationStatus?: string | null,
     punchOutLocationStatus?: string | null,
   ): string {
+    const hasRecordedLocation =
+      (punchInLocationStatus !== undefined && punchInLocationStatus !== null) ||
+      (punchOutLocationStatus !== undefined && punchOutLocationStatus !== null);
+
+    if (!hasRecordedLocation) return '—';
     if (punchInLocationStatus === 'OFFICE' && punchOutLocationStatus === 'OFFICE') return 'In Office';
     if (punchInLocationStatus === 'OFFICE' && punchOutLocationStatus === 'OUTSIDE') return 'Checked Out Outside Office';
     if (punchInLocationStatus === 'OUTSIDE' && punchOutLocationStatus === 'OFFICE') return 'Checked In Outside Office';
@@ -884,8 +1035,30 @@ export class AttendanceService {
     });
   }
 
-  getAll() {
+  private normalizeBusinessDateInput(date?: string) {
+    if (!date) return this.today();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new BadRequestException('Date must be in YYYY-MM-DD format');
+    }
+
+    const parsed = new Date(`${date}T12:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException('Invalid date');
+    }
+
+    return this.attendanceDate(parsed);
+  }
+
+  getAll(date?: string) {
+    const normalizedDate = this.normalizeBusinessDateInput(date);
+    const today = this.today();
+
+    if (normalizedDate.getTime() > today.getTime()) {
+      throw new BadRequestException('Future attendance is not available');
+    }
+
     return this.prisma.attendanceRecord.findMany({
+      where: { date: normalizedDate },
       include: { user: { include: { employee: true } } },
       orderBy: { date: 'desc' },
     }).then((records) => records.map((record) => this.effectiveRecord(record)));

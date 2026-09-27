@@ -199,6 +199,191 @@ describe('AttendanceService employee scope', () => {
   });
 });
 
+describe('AttendanceService missed-attendance correction', () => {
+  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('allows %s to add missed attendance for an employee', async (role) => {
+    const attendanceRecord = {
+      findUnique: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: 12, userId: 70, date: new Date('2026-09-08'), clockIn: new Date('2026-09-08T09:00:00Z'), clockOut: new Date('2026-09-08T17:00:00Z'), totalHours: 8, status: AttendanceStatus.PRESENT }),
+      update: jest.fn().mockResolvedValue({ id: 12, status: AttendanceStatus.PRESENT }),
+    };
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({ id: 9, userId: 70, status: 'ACTIVE', user: { email: 'employee@example.com' } }),
+      },
+      leave: { findFirst: jest.fn().mockResolvedValue(null) },
+      attendanceRecord,
+      attendanceRegularization: { create: jest.fn().mockResolvedValue({ id: 1, status: 'APPROVED' }) },
+      auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
+      $transaction: jest.fn(async (callback: any) => callback({
+        employee: { findUnique: jest.fn().mockResolvedValue({ id: 9, userId: 70, status: 'ACTIVE', user: { email: 'employee@example.com' } }) },
+        leave: { findFirst: jest.fn().mockResolvedValue(null) },
+        attendanceRecord,
+        attendanceRegularization: { create: jest.fn().mockResolvedValue({ id: 1, status: 'APPROVED' }) },
+        auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
+      })),
+    } as any;
+
+    const service = new AttendanceService(
+      prisma,
+      { isHoliday: jest.fn() } as any,
+      { canAccessOrganizationWide: jest.fn().mockReturnValue(true) } as any,
+      { getWorkingDates: jest.fn().mockResolvedValue([new Date('2026-09-08T00:00:00Z')]) } as any,
+    );
+
+    await expect(service.addMissedAttendance({
+      employeeId: 9,
+      date: '2026-09-08',
+      clockIn: '2026-09-08T09:00:00Z',
+      clockOut: '2026-09-08T17:00:00Z',
+      reason: 'system checkout failure',
+    }, { id: 1, role, email: 'hr@example.com' } as any, '127.0.0.1')).resolves.toEqual(expect.objectContaining({
+      record: expect.objectContaining({ status: AttendanceStatus.PRESENT }),
+    }));
+
+    expect(attendanceRecord.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['EMPLOYEE', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'])('blocks %s from adding missed attendance', async (role) => {
+    const service = new AttendanceService({
+      employee: { findUnique: jest.fn() },
+      leave: { findFirst: jest.fn() },
+      attendanceRecord: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
+      attendanceRegularization: { create: jest.fn() },
+      auditLog: { create: jest.fn() },
+      $transaction: jest.fn(),
+    } as any, { isHoliday: jest.fn() } as any, {
+      canAccessOrganizationWide: jest.fn().mockReturnValue(false),
+    } as any, {
+      getWorkingDates: jest.fn(),
+    } as any);
+
+    await expect(service.addMissedAttendance({
+      employeeId: 9,
+      date: '2026-09-08',
+      clockIn: '2026-09-08T09:00:00Z',
+      clockOut: '2026-09-08T17:00:00Z',
+      reason: 'system failure',
+    }, { id: 2, role, email: 'user@example.com' } as any, '127.0.0.1')).rejects.toThrow('Access denied');
+  });
+
+  it('rejects missed attendance on a non-working day', async () => {
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({ id: 9, userId: 70, status: 'ACTIVE', user: { email: 'employee@example.com' } }),
+      },
+      leave: { findFirst: jest.fn().mockResolvedValue(null) },
+      attendanceRecord: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
+      auditLog: { create: jest.fn() },
+      $transaction: jest.fn(),
+    } as any;
+
+    const service = new AttendanceService(
+      prisma,
+      { isHoliday: jest.fn() } as any,
+      { canAccessOrganizationWide: jest.fn().mockReturnValue(true) } as any,
+      { getWorkingDates: jest.fn().mockResolvedValue([]) } as any,
+    );
+
+    await expect(service.addMissedAttendance({
+      employeeId: 9,
+      date: '2026-09-13',
+      clockIn: '2026-09-13T09:00:00Z',
+      clockOut: '2026-09-13T17:00:00Z',
+      reason: 'system failure',
+    }, { id: 1, role: 'HR', email: 'hr@example.com' } as any, '127.0.0.1')).rejects.toThrow('working day');
+  });
+
+  it('rejects blank and whitespace-only reasons', async () => {
+    const service = new AttendanceService({
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 9, userId: 70, status: 'ACTIVE', user: { email: 'employee@example.com' } }) },
+      leave: { findFirst: jest.fn().mockResolvedValue(null) },
+      attendanceRecord: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn(), update: jest.fn() },
+      auditLog: { create: jest.fn() },
+      $transaction: jest.fn(),
+    } as any, { isHoliday: jest.fn() } as any, {
+      canAccessOrganizationWide: jest.fn().mockReturnValue(true),
+    } as any, {
+      getWorkingDates: jest.fn().mockResolvedValue([new Date('2026-09-08T00:00:00Z')]),
+    } as any);
+
+    await expect(service.addMissedAttendance({
+      employeeId: 9,
+      date: '2026-09-08',
+      clockIn: '2026-09-08T09:00:00Z',
+      clockOut: '2026-09-08T17:00:00Z',
+      reason: '   ',
+    }, { id: 1, role: 'HR', email: 'hr@example.com' } as any, '127.0.0.1')).rejects.toThrow('meaningful reason');
+  });
+
+  it('records the reason inside the audit payload without introducing a new answer column', async () => {
+    const auditLogCreate = jest.fn().mockResolvedValue({ id: 1 });
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({ id: 9, userId: 70, status: 'ACTIVE', user: { email: 'employee@example.com' } }),
+      },
+      leave: { findFirst: jest.fn().mockResolvedValue(null) },
+      attendanceRecord: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 12, userId: 70, date: new Date('2026-09-08'), clockIn: new Date('2026-09-08T09:00:00Z'), clockOut: new Date('2026-09-08T17:00:00Z'), totalHours: 8, status: AttendanceStatus.PRESENT, notes: 'system correction' }),
+        update: jest.fn(),
+      },
+      auditLog: { create: auditLogCreate },
+      $transaction: jest.fn(async (callback: any) => callback(prisma)),
+    } as any;
+
+    const service = new AttendanceService(
+      prisma,
+      { isHoliday: jest.fn() } as any,
+      { canAccessOrganizationWide: jest.fn().mockReturnValue(true) } as any,
+      { getWorkingDates: jest.fn().mockResolvedValue([new Date('2026-09-08T00:00:00Z')]) } as any,
+    );
+
+    await service.addMissedAttendance({
+      employeeId: 9,
+      date: '2026-09-08',
+      clockIn: '2026-09-08T09:00:00Z',
+      clockOut: '2026-09-08T17:00:00Z',
+      reason: 'system correction',
+    }, { id: 1, role: 'HR', email: 'hr@example.com' } as any, '127.0.0.1');
+
+    expect(auditLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'MISSED_ATTENDANCE_ADDED',
+        previousVal: null,
+        newVal: expect.stringContaining('system correction'),
+      }),
+    });
+  });
+
+  it('blocks missed attendance when the date already has approved leave', async () => {
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({ id: 9, userId: 70, status: 'ACTIVE', user: { email: 'employee@example.com' } }),
+      },
+      leave: { findFirst: jest.fn().mockResolvedValue({ id: 5, status: 'APPROVED' }) },
+      attendanceRecord: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn(), update: jest.fn() },
+      attendanceRegularization: { create: jest.fn() },
+      auditLog: { create: jest.fn() },
+      $transaction: jest.fn(async (callback: any) => callback(prisma)),
+    } as any;
+
+    const service = new AttendanceService(
+      prisma,
+      { isHoliday: jest.fn() } as any,
+      { canAccessOrganizationWide: jest.fn().mockReturnValue(true) } as any,
+      { getWorkingDates: jest.fn().mockResolvedValue([new Date('2026-09-08T00:00:00Z')]) } as any,
+    );
+
+    await expect(service.addMissedAttendance({
+      employeeId: 9,
+      date: '2026-09-08',
+      clockIn: '2026-09-08T09:00:00Z',
+      clockOut: '2026-09-08T17:00:00Z',
+      reason: 'system failure',
+    }, { id: 1, role: 'HR', email: 'hr@example.com' } as any, '127.0.0.1')).rejects.toThrow('approved leave');
+  });
+});
+
 describe('AttendanceService punch transactions', () => {
   const holidayService = { isHoliday: jest.fn() } as any;
   const authorizationService = { canAccessEmployee: jest.fn() } as any;
@@ -812,7 +997,7 @@ describe('AttendanceService historical reads', () => {
   });
 
   it('keeps inactive employee attendance history readable', async () => {
-    const attendance = [{ id: 1, employeeId: 7, date: new Date('2026-08-01'), status: undefined, locationLabel: 'Unknown' }];
+    const attendance = [{ id: 1, employeeId: 7, date: new Date('2026-08-01'), status: undefined, locationLabel: '—' }];
     const prisma = {
       employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70, status: 'INACTIVE' }) },
       attendanceRecord: { findMany: jest.fn().mockResolvedValue(attendance), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
@@ -1665,6 +1850,24 @@ describe('AttendanceService WFH location working-day integration', () => {
     await service.punchIn(7, 1, 2);
 
     expect(getWorkingDatesSpy).toHaveBeenCalledWith(7, [new Date(Date.UTC(2026, 8, 7))]);
+  });
+
+  it('returns the empty-state marker when there is no attendance record or location data', async () => {
+    const { service, prisma } = createService({ teamName: null });
+    prisma.attendanceRecord.findMany.mockResolvedValueOnce([{
+      id: 1,
+      userId: 70,
+      date: new Date(2026, 8, 7),
+      clockIn: null,
+      clockOut: null,
+      status: AttendanceStatus.ABSENT,
+      punchInLocationStatus: null,
+      punchOutLocationStatus: null,
+    }]);
+
+    await expect(service.getAttendanceHistory(70)).resolves.toEqual([
+      expect.objectContaining({ locationLabel: '—' }),
+    ]);
   });
 
   it.each([

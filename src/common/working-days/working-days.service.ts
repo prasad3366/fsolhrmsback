@@ -20,9 +20,9 @@ export class WorkingDaysService {
 
     const isSales = employee.team?.name?.toUpperCase() === 'SALES';
     const eligibleDates = dates.filter((date) => {
-      const businessDate = getBusinessDateKey(date);
-      const day = new Date(`${businessDate}T00:00:00.000Z`).getUTCDay();
-      return day !== 0 && (isSales || day !== 6);
+      const [year, month, day] = getBusinessDateKey(date).split('-').map(Number);
+      const businessWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+      return businessWeekday !== 0 && (isSales || businessWeekday !== 6);
     });
 
     const holidayResults = await Promise.all(

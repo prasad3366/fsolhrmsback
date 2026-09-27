@@ -1,37 +1,77 @@
+﻿import 'reflect-metadata';
+
+import { PrismaService } from '../prisma/prisma.service';
+import { MailService } from '../mail/mail.service';
+import {
+  AuthorizationService,
+  AuthorizationUser,
+} from '../common/authorization/authorization.service';
 import { EmployeesController } from './employees.controller';
 import { EmployeesService } from './employees.service';
+
+type EmployeeQuery = {
+  where?: Record<string, unknown>;
+  select?: Record<string, unknown>;
+};
+
+const createMockMailService = (sendEmployeeCredentialsMock?: jest.Mock): MailService =>
+  ({
+    transporter: {},
+    logoPath: 'mock-logo',
+    sendEmployeeCredentials: sendEmployeeCredentialsMock ?? jest.fn().mockResolvedValue(undefined),
+    sendOtp: jest.fn().mockResolvedValue(undefined),
+  }) as unknown as MailService;
 
 describe('EmployeesService employee collection authorization', () => {
   const employeeFindMany = jest.fn();
   const employeeCount = jest.fn();
   const teamFindMany = jest.fn();
+
   const prisma = {
     employee: { findMany: employeeFindMany, count: employeeCount },
     team: { findMany: teamFindMany },
-  } as any;
-  const mailService = {} as any;
+  } as unknown as PrismaService;
+
   const authorizationService = {
-    canAccessOrganizationWide: jest.fn((user: { role: string }) =>
-      ['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE'].includes(user.role),
+    canAccessOrganizationWide: jest.fn((user: { role?: string } = {}) =>
+      [
+        'SUPER_ADMIN',
+        'CEO',
+        'HR',
+        'FINANCE_MANAGER',
+        'IT_MANAGER',
+        'SALES_MANAGER',
+        'EMPLOYEE',
+      ].includes(String(user.role ?? '').toUpperCase()),
     ),
-  } as any;
+  } as unknown as AuthorizationService;
+
   let service: EmployeesService;
+
+  const getFirstEmployeeQuery = (): EmployeeQuery | undefined => {
+    const calls = employeeFindMany.mock as unknown as { calls: Array<[EmployeeQuery]> };
+    return calls.calls[0]?.[0];
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
     employeeFindMany.mockResolvedValue([]);
     employeeCount.mockResolvedValue(0);
     teamFindMany.mockResolvedValue([]);
-    service = new EmployeesService(prisma, mailService, authorizationService);
+    service = new EmployeesService(prisma, createMockMailService(), authorizationService);
   });
 
   it.each(['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER'])(
     '%s retains the unfiltered employee collection',
     async (role) => {
-      await service.getAllEmployees({ id: 1, role, employeeId: 10 });
+      await service.getAllEmployees({
+        id: 1,
+        role,
+        employeeId: 10,
+      } as AuthorizationUser);
 
       expect(teamFindMany).not.toHaveBeenCalled();
-      expect(employeeFindMany.mock.calls[0][0].where).toBeUndefined();
+      expect(getFirstEmployeeQuery()?.where).toBeUndefined();
     },
   );
 
@@ -44,10 +84,10 @@ describe('EmployeesService employee collection authorization', () => {
         employeeId: 10,
         teamId: 999,
         managerId: 999,
-      } as any);
+      } as AuthorizationUser);
 
       expect(teamFindMany).not.toHaveBeenCalled();
-      expect(employeeFindMany.mock.calls[0][0].where).toBeUndefined();
+      expect(getFirstEmployeeQuery()?.where).toBeUndefined();
     },
   );
 
@@ -57,39 +97,65 @@ describe('EmployeesService employee collection authorization', () => {
       { search: '7', page: 1, pageSize: 25 },
     );
 
-    const searchWhere = employeeFindMany.mock.calls[0][0].where;
-    expect(searchWhere.AND[1].OR).toContainEqual({ id: 7 });
-    expect(searchWhere.AND[0]).toEqual({});
+    const searchWhere = getFirstEmployeeQuery()?.where as
+      | { AND?: Array<Record<string, unknown>> }
+      | undefined;
+
+    expect(searchWhere?.AND?.[1]).toEqual(
+      expect.objectContaining({ OR: expect.arrayContaining([{ id: 7 }]) }),
+    );
+    expect(searchWhere?.AND?.[0]).toEqual({});
   });
 
   it.each(['IT_MANAGER', 'SALES_MANAGER'])(
     '%s receives the organization-wide directory without managed teams',
     async (role) => {
-      await service.getAllEmployees({ id: 1, role, employeeId: 10 });
+      await service.getAllEmployees({
+        id: 1,
+        role,
+        employeeId: 10,
+      } as AuthorizationUser);
 
-      expect(employeeFindMany.mock.calls[0][0].where).toBeUndefined();
+      expect(getFirstEmployeeQuery()?.where).toBeUndefined();
       expect(teamFindMany).not.toHaveBeenCalled();
     },
   );
 
   it('allows EMPLOYEE read-only access to their own directory record', () => {
-    const roles = Reflect.getMetadata('roles', EmployeesController.prototype.getAllEmployees);
+    const roles = Reflect.getMetadata(
+      'roles',
+      EmployeesController.prototype.getAllEmployees,
+    ) as string[];
 
     expect(roles).toContain('EMPLOYEE');
   });
 
   it('allows EMPLOYEE organization-wide directory access while keeping private detail access behind the self-check guard', async () => {
-    await service.getAllEmployees({ id: 1, role: 'EMPLOYEE', employeeId: 10 });
+    await service.getAllEmployees({
+      id: 1,
+      role: 'EMPLOYEE',
+      employeeId: 10,
+    } as AuthorizationUser);
 
     expect(teamFindMany).not.toHaveBeenCalled();
-    expect(employeeFindMany.mock.calls[0][0].where).toBeUndefined();
+    expect(getFirstEmployeeQuery()?.where).toBeUndefined();
   });
 });
 
 describe('EmployeesService employee 360 profile', () => {
   const employeeFindUnique = jest.fn();
-  const prisma = { employee: { findUnique: employeeFindUnique } } as any;
-  const service = new EmployeesService(prisma, {} as any, {} as any);
+  const prisma = {
+    employee: { findUnique: employeeFindUnique },
+  } as unknown as PrismaService;
+
+  const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
+
+  const getSelectForCall = (callIndex: number): Record<string, unknown> | undefined => {
+    const calls = employeeFindUnique.mock as unknown as {
+      calls: Array<[EmployeeQuery]>;
+    };
+    return calls.calls[callIndex]?.[0]?.select;
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -98,49 +164,77 @@ describe('EmployeesService employee 360 profile', () => {
       empCode: 'E007',
       firstName: 'Ada',
       lastName: 'Lovelace',
-      user: { id: 9, email: 'ada@example.com', role: 'EMPLOYEE', isActive: true },
-      team: { id: 3, name: 'Engineering', manager: { id: 4, firstName: 'Grace', lastName: 'Hopper' } },
+      user: {
+        id: 9,
+        email: 'ada@example.com',
+        role: 'EMPLOYEE',
+        isActive: true,
+      },
+      team: {
+        id: 3,
+        name: 'Engineering',
+        manager: { id: 4, firstName: 'Grace', lastName: 'Hopper' },
+      },
     });
   });
 
-  it.each(['SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER', 'IT_MANAGER', 'SALES_MANAGER', 'EMPLOYEE'])(
-    'returns a minimal safe projection for %s',
-    async (role) => {
-      const result = await service.getEmployee360Profile(7, role);
-      const select = employeeFindUnique.mock.calls[0][0].select;
+  it.each([
+    'SUPER_ADMIN',
+    'CEO',
+    'HR',
+    'FINANCE_MANAGER',
+    'IT_MANAGER',
+    'SALES_MANAGER',
+    'EMPLOYEE',
+  ])('returns a minimal safe projection for %s', async (role) => {
+    const result = (await service.getEmployee360Profile(7, role)) as Record<string, unknown>;
+    const select = getSelectForCall(0);
 
-      expect(result).toEqual(expect.objectContaining({ id: 7, team: expect.any(Object) }));
-      expect(select).not.toHaveProperty('bankAccountNumber');
-      expect(select).not.toHaveProperty('ifscCode');
-      expect(select).not.toHaveProperty('panNumber');
-      expect(select).not.toHaveProperty('aadharNumber');
-      expect(select).not.toHaveProperty('attendances');
-      expect(select).not.toHaveProperty('leaves');
-      expect(select).not.toHaveProperty('wfhRequests');
-      expect(select).not.toHaveProperty('documents');
-      expect(select).not.toHaveProperty('salaries');
-      expect(select).not.toHaveProperty('payrolls');
-    },
-  );
+    expect(result).toEqual(expect.objectContaining({ id: 7, team: expect.any(Object) }));
+    expect(select).not.toHaveProperty('bankAccountNumber');
+    expect(select).not.toHaveProperty('ifscCode');
+    expect(select).not.toHaveProperty('panNumber');
+    expect(select).not.toHaveProperty('aadharNumber');
+    expect(select).not.toHaveProperty('attendances');
+    expect(select).not.toHaveProperty('leaves');
+    expect(select).not.toHaveProperty('wfhRequests');
+    expect(select).not.toHaveProperty('documents');
+    expect(select).not.toHaveProperty('salaries');
+    expect(select).not.toHaveProperty('payrolls');
+  });
 
   it('does not include detailed contact fields for team managers or finance', async () => {
     await service.getEmployee360Profile(7, 'IT_MANAGER');
-    expect(employeeFindUnique.mock.calls[0][0].select).not.toHaveProperty('currentAddress');
+    expect(getSelectForCall(0)).not.toHaveProperty('currentAddress');
 
     await service.getEmployee360Profile(7, 'FINANCE_MANAGER');
-    expect(employeeFindUnique.mock.calls[1][0].select).not.toHaveProperty('currentAddress');
+    expect(getSelectForCall(1)).not.toHaveProperty('currentAddress');
   });
 });
 
 describe('EmployeesService employee 360 hierarchy', () => {
   const employeeFindUnique = jest.fn();
-  const prisma = { employee: { findUnique: employeeFindUnique } } as any;
-  const authorizationService = { canAccessEmployee: jest.fn() } as any;
-  const service = new EmployeesService(prisma, {} as any, authorizationService);
+  const prisma = {
+    employee: { findUnique: employeeFindUnique },
+  } as unknown as PrismaService;
+
+  const canAccessEmployeeMock = jest.fn();
+  const authorizationService = {
+    canAccessEmployee: canAccessEmployeeMock,
+  } as unknown as AuthorizationService;
+
+  const service = new EmployeesService(prisma, createMockMailService(), authorizationService);
+
+  const getSelectForCall = (callIndex: number): Record<string, unknown> | undefined => {
+    const calls = employeeFindUnique.mock as unknown as {
+      calls: Array<[EmployeeQuery]>;
+    };
+    return calls.calls[callIndex]?.[0]?.select;
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
-    authorizationService.canAccessEmployee.mockResolvedValue(true);
+    canAccessEmployeeMock.mockResolvedValue(true);
     employeeFindUnique.mockResolvedValue({
       id: 7,
       team: {
@@ -157,7 +251,11 @@ describe('EmployeesService employee 360 hierarchy', () => {
   });
 
   it('returns only the target hierarchy projection for an EMPLOYEE', async () => {
-    const user = { id: 9, role: 'EMPLOYEE', employeeId: 7 };
+    const user = {
+      id: 9,
+      role: 'EMPLOYEE',
+      employeeId: 7,
+    } as AuthorizationUser;
 
     await expect(service.getEmployee360Hierarchy(user, 7)).resolves.toEqual({
       employeeId: 7,
@@ -170,8 +268,9 @@ describe('EmployeesService employee 360 hierarchy', () => {
       reportingRelationship: { type: 'TEAM_MANAGER', managerEmployeeId: 4 },
     });
 
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(user, 7);
-    const select = employeeFindUnique.mock.calls[0][0].select;
+    expect(canAccessEmployeeMock).toHaveBeenCalledWith(user, 7);
+
+    const select = getSelectForCall(0);
     expect(select).toEqual({
       id: true,
       team: {
@@ -179,7 +278,12 @@ describe('EmployeesService employee 360 hierarchy', () => {
           id: true,
           name: true,
           manager: {
-            select: { id: true, firstName: true, lastName: true, designation: true },
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              designation: true,
+            },
           },
         },
       },
@@ -189,49 +293,94 @@ describe('EmployeesService employee 360 hierarchy', () => {
   });
 
   it('denies an EMPLOYEE another employee hierarchy', async () => {
-    authorizationService.canAccessEmployee.mockResolvedValue(false);
+    canAccessEmployeeMock.mockResolvedValue(false);
 
     await expect(
-      service.getEmployee360Hierarchy({ id: 9, role: 'EMPLOYEE', employeeId: 7 }, 8),
+      service.getEmployee360Hierarchy(
+        {
+          id: 9,
+          role: 'EMPLOYEE',
+          employeeId: 7,
+        } as AuthorizationUser,
+        8,
+      ),
     ).rejects.toThrow('Access denied for employee hierarchy');
     expect(employeeFindUnique).not.toHaveBeenCalled();
   });
 
-  it.each(['IT_MANAGER', 'SALES_MANAGER'])('allows %s for managed-team employees', async (role) => {
-    await expect(
-      service.getEmployee360Hierarchy({ id: 9, role, employeeId: 4 }, 7),
-    ).resolves.toEqual(expect.objectContaining({ employeeId: 7 }));
-  });
+  it.each(['IT_MANAGER', 'SALES_MANAGER'])(
+    'allows %s for managed-team employees',
+    async (role) => {
+      await expect(
+        service.getEmployee360Hierarchy(
+          {
+            id: 9,
+            role,
+            employeeId: 4,
+          } as AuthorizationUser,
+          7,
+        ),
+      ).resolves.toEqual(expect.objectContaining({ employeeId: 7 }));
+    },
+  );
 
-  it.each(['IT_MANAGER', 'SALES_MANAGER'])('denies %s outside-team employees', async (role) => {
-    authorizationService.canAccessEmployee.mockResolvedValue(false);
+  it.each(['IT_MANAGER', 'SALES_MANAGER'])(
+    'denies %s outside-team employees',
+    async (role) => {
+      canAccessEmployeeMock.mockResolvedValue(false);
 
-    await expect(
-      service.getEmployee360Hierarchy({ id: 9, role, employeeId: 4 }, 8),
-    ).rejects.toThrow('Access denied for employee hierarchy');
-  });
+      await expect(
+        service.getEmployee360Hierarchy(
+          {
+            id: 9,
+            role,
+            employeeId: 4,
+          } as AuthorizationUser,
+          8,
+        ),
+      ).rejects.toThrow('Access denied for employee hierarchy');
+    },
+  );
 
-  it.each(['SUPER_ADMIN', 'CEO', 'HR'])('allows %s organization-wide hierarchy access', async (role) => {
-    await expect(
-      service.getEmployee360Hierarchy({ id: 9, role }, 7),
-    ).resolves.toEqual(expect.objectContaining({ employeeId: 7 }));
-  });
+  it.each(['SUPER_ADMIN', 'CEO', 'HR'])(
+    'allows %s organization-wide hierarchy access',
+    async (role) => {
+      await expect(
+        service.getEmployee360Hierarchy({ id: 9, role } as AuthorizationUser, 7),
+      ).resolves.toEqual(expect.objectContaining({ employeeId: 7 }));
+    },
+  );
 
   it('denies FINANCE_MANAGER hierarchy access without consulting broader employee policy', async () => {
     await expect(
-      service.getEmployee360Hierarchy({ id: 9, role: 'FINANCE_MANAGER', employeeId: 10 }, 7),
+      service.getEmployee360Hierarchy(
+        {
+          id: 9,
+          role: 'FINANCE_MANAGER',
+          employeeId: 10,
+        } as AuthorizationUser,
+        7,
+      ),
     ).rejects.toThrow('Access denied for employee hierarchy');
-    expect(authorizationService.canAccessEmployee).not.toHaveBeenCalled();
+    expect(canAccessEmployeeMock).not.toHaveBeenCalled();
     expect(employeeFindUnique).not.toHaveBeenCalled();
   });
 
   it('does not trust client-supplied team or manager identifiers', async () => {
-    const user = { id: 9, role: 'IT_MANAGER', employeeId: 4, teamId: 999, managerId: 999 } as any;
+    const user = {
+      id: 9,
+      role: 'IT_MANAGER',
+      employeeId: 4,
+      teamId: 999,
+      managerId: 999,
+    } as AuthorizationUser;
 
     await service.getEmployee360Hierarchy(user, 7);
 
-    expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(user, 7);
-    expect(employeeFindUnique.mock.calls[0][0].where).toEqual({ id: 7 });
+    expect(canAccessEmployeeMock).toHaveBeenCalledWith(user, 7);
+    expect(
+      (employeeFindUnique.mock as unknown as { calls: Array<[EmployeeQuery]> }).calls[0]?.[0]?.where,
+    ).toEqual({ id: 7 });
   });
 });
 
@@ -239,49 +388,52 @@ describe('EmployeesService employee creation transaction', () => {
   it.each(['INACTIVE', 'ACTIVE'])(
     'creates a %s employee with matching User.isActive and emails credentials',
     async (status) => {
-    const employeeCreate = jest.fn().mockResolvedValue({ id: 7 });
-    const userCreate = jest.fn().mockResolvedValue({ id: 42 });
-    const transaction = jest.fn(async (callback) =>
-      callback({
-        user: { create: userCreate },
-        employee: { create: employeeCreate },
-      }),
-    );
-    const prisma = {
-      user: { findUnique: jest.fn().mockResolvedValue(null) },
-      employee: { findUnique: jest.fn().mockResolvedValue(null) },
-      $transaction: transaction,
-    } as any;
-    const mailService = { sendEmployeeCredentials: jest.fn().mockResolvedValue(undefined) } as any;
-    const service = new EmployeesService(prisma, mailService, {} as any);
-    const dto = {
-      email: 'new@example.com',
-      empCode: 'EMP-42',
-      role: 'EMPLOYEE',
-      firstName: 'New',
-      status,
-    } as any;
+      const employeeCreate = jest.fn().mockResolvedValue({ id: 7 });
+      const userCreate = jest.fn().mockResolvedValue({ id: 42 });
+      const transaction = jest.fn(async (callback) =>
+        callback({
+          user: { create: userCreate },
+          employee: { create: employeeCreate },
+        }),
+      );
 
-    const response = await service.createEmployee(dto, 'HR');
+      const prisma = {
+        user: { findUnique: jest.fn().mockResolvedValue(null) },
+        employee: { findUnique: jest.fn().mockResolvedValue(null) },
+        $transaction: transaction,
+      } as unknown as PrismaService;
 
-    expect(response).toEqual({
-      message: 'Employee created successfully',
-      username: dto.email,
-      role: dto.role,
-    });
-    expect(response).not.toHaveProperty('password');
-    expect(transaction).toHaveBeenCalledTimes(1);
-    expect(userCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        isActive: status === 'ACTIVE',
-      }),
-    });
-    expect(employeeCreate).toHaveBeenCalledTimes(1);
-    expect(mailService.sendEmployeeCredentials).toHaveBeenCalledWith(
-      dto.email,
-      expect.any(String),
-      dto.firstName,
-    );
+      const sendEmployeeCredentialsMock = jest.fn().mockResolvedValue(undefined);
+      const mailService = createMockMailService(sendEmployeeCredentialsMock);
+      const service = new EmployeesService(prisma, mailService, {} as AuthorizationService);
+      const dto = {
+        email: 'new@example.com',
+        empCode: 'EMP-42',
+        role: 'EMPLOYEE',
+        firstName: 'New',
+        status,
+      } as any;
+
+      const response = await service.createEmployee(dto, 'HR');
+
+      expect(response).toEqual({
+        message: 'Employee created successfully',
+        username: dto.email,
+        role: dto.role,
+      });
+      expect(response).not.toHaveProperty('password');
+      expect(transaction).toHaveBeenCalledTimes(1);
+      expect(userCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          isActive: status === 'ACTIVE',
+        }),
+      });
+      expect(employeeCreate).toHaveBeenCalledTimes(1);
+      expect(sendEmployeeCredentialsMock).toHaveBeenCalledWith(
+        dto.email,
+        expect.any(String),
+        dto.firstName,
+      );
     },
   );
 
@@ -311,18 +463,25 @@ describe('EmployeesService employee creation transaction', () => {
         throw error;
       }
     });
+
     const prisma = {
       user: { findUnique: jest.fn().mockResolvedValue(null) },
       employee: { findUnique: jest.fn().mockResolvedValue(null) },
       $transaction: transaction,
-    } as any;
-    const mailService = { sendEmployeeCredentials: jest.fn() } as any;
-    const authorizationService = {} as any;
-    const service = new EmployeesService(prisma, mailService, authorizationService);
+    } as unknown as PrismaService;
+
+    const sendEmployeeCredentialsMock = jest.fn();
+    const mailService = createMockMailService(sendEmployeeCredentialsMock);
+    const service = new EmployeesService(prisma, mailService, {} as AuthorizationService);
 
     await expect(
       service.createEmployee(
-        { email: 'new@example.com', empCode: 'EMP-42', role: 'EMPLOYEE', firstName: 'New' } as any,
+        {
+          email: 'new@example.com',
+          empCode: 'EMP-42',
+          role: 'EMPLOYEE',
+          firstName: 'New',
+        } as any,
         'HR',
       ),
     ).rejects.toThrow('employee creation failed');
@@ -331,7 +490,7 @@ describe('EmployeesService employee creation transaction', () => {
     expect(userCreate).toHaveBeenCalledTimes(1);
     expect(employeeCreate).toHaveBeenCalledTimes(1);
     expect(committedUsers).toEqual([]);
-    expect(mailService.sendEmployeeCredentials).not.toHaveBeenCalled();
+    expect(sendEmployeeCredentialsMock).not.toHaveBeenCalled();
   });
 });
 
@@ -343,16 +502,14 @@ describe('EmployeesService employee status synchronization', () => {
     'updates User.isActive when Employee.status changes to %s',
     async (status, isActive) => {
       const userUpdate = jest.fn().mockResolvedValue({});
-      const employeeUpdate = jest.fn().mockResolvedValue({
-        id: 7,
-        status,
-      });
+      const employeeUpdate = jest.fn().mockResolvedValue({ id: 7, status });
       const transaction = jest.fn(async (callback) =>
         callback({
           user: { update: userUpdate },
           employee: { update: employeeUpdate },
         }),
       );
+
       const prisma = {
         employee: {
           findUnique: jest.fn().mockResolvedValue({
@@ -365,8 +522,9 @@ describe('EmployeesService employee status synchronization', () => {
         },
         user: { findUnique: jest.fn() },
         $transaction: transaction,
-      } as any;
-      const service = new EmployeesService(prisma, {} as any, {} as any);
+      } as unknown as PrismaService;
+
+      const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
 
       await service.updateEmployee(7, { status } as any);
 
@@ -401,6 +559,7 @@ describe('EmployeesService employee status synchronization', () => {
         throw error;
       }
     });
+
     const prisma = {
       employee: {
         findUnique: jest.fn().mockResolvedValue({
@@ -413,12 +572,13 @@ describe('EmployeesService employee status synchronization', () => {
       },
       user: { findUnique: jest.fn() },
       $transaction: transaction,
-    } as any;
-    const service = new EmployeesService(prisma, {} as any, {} as any);
+    } as unknown as PrismaService;
 
-    await expect(
-      service.updateEmployee(7, { status: 'INACTIVE' } as any),
-    ).rejects.toThrow('employee update failed');
+    const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
+
+    await expect(service.updateEmployee(7, { status: 'INACTIVE' } as any)).rejects.toThrow(
+      'employee update failed',
+    );
 
     expect(userUpdate).toHaveBeenCalledWith({
       where: { id: 42 },
@@ -452,9 +612,9 @@ describe('EmployeesService generic update role hardening', () => {
       },
       user: { findUnique: jest.fn() },
       $transaction: transaction,
-    } as any;
+    } as unknown as PrismaService;
 
-    const service = new EmployeesService(prisma, {} as any, {} as any);
+    const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
 
     await service.updateEmployee(7, { firstName: 'Ada', role: 'CEO' } as any);
 
@@ -493,9 +653,9 @@ describe('EmployeesService generic update role hardening', () => {
         },
         user: { findUnique: jest.fn() },
         $transaction: transaction,
-      } as any;
+      } as unknown as PrismaService;
 
-      const service = new EmployeesService(prisma, {} as any, {} as any);
+      const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
 
       await service.updateEmployee(7, { status: 'ACTIVE', role } as any);
 
@@ -533,9 +693,9 @@ describe('EmployeesService generic update role hardening', () => {
       },
       user: { findUnique: jest.fn() },
       $transaction: transaction,
-    } as any;
+    } as unknown as PrismaService;
 
-    const service = new EmployeesService(prisma, {} as any, {} as any);
+    const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
 
     await service.updateEmployee(7, {
       firstName: 'Grace',

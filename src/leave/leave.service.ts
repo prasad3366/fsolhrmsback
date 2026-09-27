@@ -294,15 +294,33 @@ export class LeaveService {
           });
         }
 
+        const isMonthlyCombinedLeave = this.isMonthlyCombinedPaidLeaveType(leaveType.name);
         const available = balance.allocated + balance.carryForward - balance.used;
         const allowsLossOfPay = leavePolicy?.isLossOfPay === true;
-        const isLossOfPay = available < totalDays && allowsLossOfPay;
-        if (available < totalDays && !isLossOfPay) {
-          throw new BadRequestException('Insufficient leave balance');
-        }
 
-        const paidLeaveDays = Math.min(totalDays, Math.max(0, available));
-        const lopDays = isLossOfPay ? Math.max(totalDays - paidLeaveDays, 0) : 0;
+        let paidLeaveDays = totalDays;
+        let lopDays = 0;
+        let isLossOfPay = false;
+
+        if (isMonthlyCombinedLeave) {
+          const monthlyCombined = await this.calculateMonthlyCombinedPaidLeave(
+            tx,
+            employeeId,
+            leaveType.name,
+            totalDays,
+            start,
+          );
+          paidLeaveDays = monthlyCombined.paidLeaveDays;
+          lopDays = monthlyCombined.lopDays;
+          isLossOfPay = monthlyCombined.isLossOfPay;
+        } else {
+          isLossOfPay = available < totalDays && allowsLossOfPay;
+          if (available < totalDays && !isLossOfPay) {
+            throw new BadRequestException('Insufficient leave balance');
+          }
+          paidLeaveDays = Math.min(totalDays, Math.max(0, available));
+          lopDays = isLossOfPay ? Math.max(totalDays - paidLeaveDays, 0) : 0;
+        }
 
         const requiresMedical = leavePolicy?.requiresDocument ?? leaveType.requiresMedical;
         if (requiresMedical && totalDays > 2 && !dto.medicalCertificate) {
@@ -384,18 +402,38 @@ export class LeaveService {
           },
         });
 
-        if (!balance) throw new NotFoundException('Leave balance not found');
-
-        const available = balance.allocated + balance.carryForward - balance.used;
-        const isLop = leave.isLossOfPay ?? false;
-        if (available < leave.totalDays && !isLop) {
-          throw new BadRequestException('Insufficient leave balance');
+        if (!balance && !this.isMonthlyCombinedPaidLeaveType(leave.leaveType?.name)) {
+          throw new NotFoundException('Leave balance not found');
         }
 
-        const paidLeaveDays = isLop
-          ? Math.min(leave.totalDays, Math.max(0, available))
-          : Number(leave.paidLeaveDays ?? leave.totalDays ?? 0);
-        const lopDays = Math.max(leave.totalDays - paidLeaveDays, 0);
+        const isMonthlyCombinedLeave = this.isMonthlyCombinedPaidLeaveType(leave.leaveType?.name);
+        let paidLeaveDays = Number(leave.paidLeaveDays ?? leave.totalDays ?? 0);
+        let lopDays = 0;
+
+        if (isMonthlyCombinedLeave) {
+          const leaveStart = leave.startDate ? new Date(leave.startDate) : new Date();
+          const monthlyCombined = await this.calculateMonthlyCombinedPaidLeave(
+            tx,
+            leave.employeeId,
+            leave.leaveType?.name,
+            Number(leave.totalDays ?? 0),
+            Number.isNaN(leaveStart.getTime()) ? new Date() : leaveStart,
+            leave.id,
+          );
+          paidLeaveDays = monthlyCombined.paidLeaveDays;
+          lopDays = monthlyCombined.lopDays;
+        } else {
+          if (!balance) throw new NotFoundException('Leave balance not found');
+          const available = balance.allocated + balance.carryForward - balance.used;
+          const isLop = leave.isLossOfPay ?? false;
+          if (available < leave.totalDays && !isLop) {
+            throw new BadRequestException('Insufficient leave balance');
+          }
+          paidLeaveDays = isLop
+            ? Math.min(leave.totalDays, Math.max(0, available))
+            : Number(leave.paidLeaveDays ?? leave.totalDays ?? 0);
+          lopDays = Math.max(leave.totalDays - paidLeaveDays, 0);
+        }
 
         const decisionAt = new Date();
         const transition = await tx.leave.updateMany({
@@ -581,10 +619,11 @@ export class LeaveService {
     const policiesByName = new Map(policies.map((policy) => [policy.leaveTypeName, policy]));
     return leaveTypes.map((type) => {
       const policy = policiesByName.get(type.name);
+      const isCombinedMonthlyLeave = this.isMonthlyCombinedPaidLeaveType(type.name);
       return {
         id: type.id,
         name: type.name,
-        yearlyQuota: policy?.annualAllocation ?? type.yearlyQuota,
+        yearlyQuota: isCombinedMonthlyLeave ? 2 : policy?.annualAllocation ?? type.yearlyQuota,
         carryForward: type.carryForward,
         maxCarryLimit: policy?.carryForwardMax ?? type.maxCarryLimit,
         monthlyAccrual: type.monthlyAccrual,
@@ -599,6 +638,7 @@ export class LeaveService {
         ? [{ id: employeeId }]
         : await this.prisma.employee.findMany({ select: { id: true } });
 
+    const leaveTypes = await this.prisma.leaveType.findMany({ select: { id: true, name: true } });
     const balances = await this.prisma.leaveBalance.findMany({
       where: {
         employeeId: { in: employees.map((e) => e.id) },
@@ -607,17 +647,89 @@ export class LeaveService {
       include: { employee: true, leaveType: true },
     });
 
-    return balances.map((b) => ({
-      employeeId: b.employeeId,
-      employeeName: `${b.employee.firstName} ${b.employee.lastName}`,
-      leaveTypeId: b.leaveTypeId,
-      id: b.leaveTypeId,
-      leaveType: b.leaveType.name,
-      allocated: b.allocated,
-      used: b.used,
-      carryForward: b.carryForward,
-      remaining: b.allocated + b.carryForward - b.used,
-    }));
+    const balanceMap = new Map(
+      balances.map((balance) => [`${balance.employeeId}:${balance.leaveTypeId}`, balance]),
+    );
+
+    const combinedUsageByEmployee = new Map<number, number>();
+    for (const employee of employees) {
+      const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+      const monthEnd = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0, 23, 59, 59, 999);
+      const combinedUsage = await this.prisma.leave.findMany({
+        where: {
+          employeeId: employee.id,
+          status: 'APPROVED',
+          startDate: { lte: monthEnd },
+          endDate: { gte: monthStart },
+          leaveType: { name: { in: ['Casual Leave', 'Sick Leave'] } },
+        },
+        include: { leaveType: { select: { name: true } } },
+      });
+      combinedUsageByEmployee.set(
+        employee.id,
+        combinedUsage.reduce((sum, leave) => sum + Number(leave.paidLeaveDays ?? 0), 0),
+      );
+    }
+
+    return employees.flatMap((employee) =>
+      leaveTypes
+        .filter(
+          (type) => !this.isMaternityLeaveType(type.name),
+        )
+        .map((type) => {
+          if (this.isMonthlyCombinedPaidLeaveType(type.name)) {
+            const used = combinedUsageByEmployee.get(employee.id) ?? 0;
+            return {
+              employeeId: employee.id,
+              employeeName: '',
+              leaveTypeId: type.id,
+              id: type.id,
+              leaveType: type.name,
+              allocated: 2,
+              used,
+              carryForward: 0,
+              remaining: Math.max(0, 2 - used),
+            };
+          }
+
+          const balance = balanceMap.get(`${employee.id}:${type.id}`);
+          if (!balance) {
+            return null;
+          }
+
+          return {
+            employeeId: employee.id,
+            employeeName: `${balance.employee.firstName} ${balance.employee.lastName}`,
+            leaveTypeId: balance.leaveTypeId,
+            id: balance.leaveTypeId,
+            leaveType: balance.leaveType.name,
+            allocated: balance.allocated,
+            used: balance.used,
+            carryForward: balance.carryForward,
+            remaining: balance.allocated + balance.carryForward - balance.used,
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
+    );
+  }
+
+  private async getCurrentMonthCombinedUsage(employeeId: number): Promise<number> {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const approvedLeaves = await this.prisma.leave.findMany({
+      where: {
+        employeeId,
+        status: 'APPROVED',
+        startDate: { lte: monthEnd },
+        endDate: { gte: monthStart },
+        leaveType: { name: { in: ['Casual Leave', 'Sick Leave'] } },
+      },
+      include: { leaveType: { select: { name: true } } },
+    });
+
+    return approvedLeaves.reduce((sum, leave) => sum + Number(leave.paidLeaveDays ?? 0), 0);
   }
 
   // ================= LEAVE HISTORY =================
@@ -794,12 +906,92 @@ export class LeaveService {
     });
   }
 
+  private isMonthlyCombinedPaidLeaveType(leaveTypeName: string | null | undefined): boolean {
+    const normalized = String(leaveTypeName ?? '').trim().toLowerCase();
+    return normalized === 'casual leave' || normalized === 'sick leave';
+  }
+
+  private async calculateMonthlyCombinedPaidLeave(
+    tx: any,
+    employeeId: number,
+    leaveTypeName: string | null | undefined,
+    totalDays: number,
+    start: Date,
+    currentLeaveId?: number,
+  ) {
+    if (!this.isMonthlyCombinedPaidLeaveType(leaveTypeName)) {
+      return { paidLeaveDays: totalDays, lopDays: 0, isLossOfPay: false };
+    }
+
+    const monthStart = new Date(start.getFullYear(), start.getMonth(), 1);
+    const monthEnd = new Date(start.getFullYear(), start.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const leaveRepo =
+      tx && typeof tx.leave?.findMany === 'function' ? tx.leave : this.prisma.leave;
+
+    const approvedLeaves =
+      typeof leaveRepo?.findMany === 'function'
+        ? await leaveRepo.findMany({
+            where: {
+              employeeId,
+              status: 'APPROVED',
+              startDate: { lte: monthEnd },
+              endDate: { gte: monthStart },
+            },
+            include: { leaveType: { select: { name: true } } },
+          })
+        : [];
+
+    const combinedPaidUsage = (approvedLeaves ?? [])
+      .filter((leave: any) => leave && leave.id !== currentLeaveId)
+      .filter((leave: any) => String(leave.status ?? '').toUpperCase() === 'APPROVED')
+      .filter((leave: any) => this.isMonthlyCombinedPaidLeaveType(leave.leaveType?.name))
+      .filter((leave: any) => {
+        const leaveStart = leave.startDate ? new Date(leave.startDate) : null;
+        const leaveEnd = leave.endDate ? new Date(leave.endDate) : null;
+        if (!leaveStart || !leaveEnd || Number.isNaN(leaveStart.getTime()) || Number.isNaN(leaveEnd.getTime())) {
+          return false;
+        }
+        return leaveStart <= monthEnd && leaveEnd >= monthStart;
+      })
+      .reduce((sum: number, leave: any) => sum + Number(leave.paidLeaveDays ?? 0), 0);
+
+    const remainingPaidPool = Math.max(0, 2 - combinedPaidUsage);
+    const paidLeaveDays = Math.min(totalDays, remainingPaidPool);
+    const lopDays = Math.max(totalDays - paidLeaveDays, 0);
+
+    return {
+      paidLeaveDays,
+      lopDays,
+      isLossOfPay: lopDays > 0,
+    };
+  }
+
+  private isMaternityLeaveType(leaveTypeName: string | null | undefined): boolean {
+    const normalized = String(leaveTypeName ?? '').trim().toLowerCase();
+    return normalized === 'maternity leave' || normalized === 'maternity';
+  }
+
   // ================= SELF BALANCE =================
   async selfBalance(employeeId: number, yearStart: number) {
     const leaveTypes = await this.prisma.leaveType.findMany();
+    const employee = this.prisma.employee
+      ? await this.prisma.employee.findUnique({
+          where: { id: employeeId },
+          select: { gender: true },
+        })
+      : null;
+    const isMaternityEligible = employee?.gender === 'FEMALE';
+    const eligibleLeaveTypes = leaveTypes.filter(
+      (type) => !this.isMaternityLeaveType(type.name) || isMaternityEligible,
+    );
+    const combinedUsage = await this.getCurrentMonthCombinedUsage(employeeId);
 
-    // Ensure balance exists for all leave types
-    for (const type of leaveTypes) {
+    for (const type of eligibleLeaveTypes) {
+      if (this.isMonthlyCombinedPaidLeaveType(type.name)) {
+        continue;
+      }
+
       await this.prisma.leaveBalance.upsert({
         where: {
           employeeId_leaveTypeId_yearStart: {
@@ -827,22 +1019,49 @@ export class LeaveService {
       });
     }
 
-    // Fetch balances
     const balances = await this.prisma.leaveBalance.findMany({
       where: { employeeId, yearStart },
       include: { leaveType: true },
     });
+    const balanceMap = new Map(balances.map((balance) => [balance.leaveTypeId, balance]));
 
-    return balances.map((b) => ({
-      leaveTypeId: b.leaveTypeId,
-      id: b.leaveTypeId,
-      leaveType: b.leaveType.name,
-      allocated: b.allocated ?? 0,
-      used: b.used ?? 0,
-      carryForward: b.carryForward ?? 0,
-      remaining:
-        (b.allocated ?? 0) + (b.carryForward ?? 0) - (b.used ?? 0),
-    }));
+    return eligibleLeaveTypes.map((type) => {
+      if (this.isMonthlyCombinedPaidLeaveType(type.name)) {
+        return {
+          leaveTypeId: type.id,
+          id: type.id,
+          leaveType: type.name,
+          allocated: 2,
+          used: combinedUsage,
+          carryForward: 0,
+          remaining: Math.max(0, 2 - combinedUsage),
+        };
+      }
+
+      const balance = balanceMap.get(type.id);
+      if (!balance) {
+        return {
+          leaveTypeId: type.id,
+          id: type.id,
+          leaveType: type.name,
+          allocated: 0,
+          used: 0,
+          carryForward: 0,
+          remaining: 0,
+        };
+      }
+
+      return {
+        leaveTypeId: balance.leaveTypeId,
+        id: balance.leaveTypeId,
+        leaveType: balance.leaveType.name,
+        allocated: balance.allocated ?? 0,
+        used: balance.used ?? 0,
+        carryForward: balance.carryForward ?? 0,
+        remaining:
+          (balance.allocated ?? 0) + (balance.carryForward ?? 0) - (balance.used ?? 0),
+      };
+    });
   }
 
   async getTargetEmployeeLeaveSummary(

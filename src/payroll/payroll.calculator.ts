@@ -16,9 +16,11 @@ export class PayrollCalculator {
 
     const conveyance = (ctc * structure.conveyancePercent) / 100;
 
-    const specialAllowance = ctc - (basic + hra + conveyance);
-
-    const gross = basic + hra + conveyance + specialAllowance;
+    const roundedBasic = round(basic);
+    const roundedHra = round(hra);
+    const roundedConveyance = round(conveyance);
+    const gross = round(ctc);
+    const specialAllowance = gross - roundedBasic - roundedHra - roundedConveyance;
 
 
     /* DEDUCTIONS */
@@ -32,22 +34,24 @@ export class PayrollCalculator {
 
     const leaveDeduction = lopDays * perDaySalary;
 
-    const deductions = pf + pt + leaveDeduction;
-
+    const roundedPf = round(pf);
+    const roundedPt = round(pt);
+    const roundedLeaveDeduction = round(leaveDeduction);
+    const deductions = roundedPf + roundedPt + roundedLeaveDeduction;
     const netSalary = gross - deductions;
 
 
     return {
-      basic: round(basic),
-      hra: round(hra),
-      conveyance: round(conveyance),
-      specialAllowance: round(specialAllowance),
-      gross: round(gross),
+      basic: roundedBasic,
+      hra: roundedHra,
+      conveyance: roundedConveyance,
+      specialAllowance,
+      gross,
 
-      pf: round(pf),
-      pt: round(pt),
+      pf: roundedPf,
+      pt: roundedPt,
       lopDays,
-      leaveDeduction: round(leaveDeduction),
+      leaveDeduction: roundedLeaveDeduction,
 
       deductions: round(deductions),
       netSalary: round(netSalary),

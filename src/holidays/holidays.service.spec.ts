@@ -39,18 +39,18 @@ describe('HolidaysService business dates', () => {
     await service.getHolidaysByYear(2026);
 
     expect(prisma.holiday.findMany).toHaveBeenCalledWith({
-      where: { date: { gte: new Date(2026, 0, 1), lt: new Date(2027, 0, 1) } },
+      where: { date: { gte: new Date(Date.UTC(2026, 0, 1)), lt: new Date(Date.UTC(2027, 0, 1)) } },
       orderBy: { date: 'asc' },
     });
   });
 
   it('preserves the existing list response and its year boundary query', async () => {
-    const holidays = [{ id: 1, date: new Date(2026, 0, 1) }, { id: 2, date: new Date(2026, 11, 31) }];
+    const holidays = [{ id: 1, date: new Date(Date.UTC(2026, 0, 1)) }, { id: 2, date: new Date(Date.UTC(2026, 11, 31)) }];
     prisma.holiday.findMany.mockResolvedValue(holidays);
 
     await expect(service.getHolidaysByYear(2026)).resolves.toBe(holidays);
     expect(prisma.holiday.findMany).toHaveBeenCalledWith({
-      where: { date: { gte: new Date(2026, 0, 1), lt: new Date(2027, 0, 1) } },
+      where: { date: { gte: new Date(Date.UTC(2026, 0, 1)), lt: new Date(Date.UTC(2027, 0, 1)) } },
       orderBy: { date: 'asc' },
     });
   });
@@ -103,11 +103,37 @@ describe('HolidaysService business dates', () => {
     await service.updateHoliday(1, { date: '2026-12-31T23:30:00.000Z' });
 
     expect(prisma.holiday.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ date: new Date(2026, 0, 1) }),
+      data: expect.objectContaining({ date: new Date(Date.UTC(2026, 0, 1)) }),
     });
     expect(prisma.holiday.update).toHaveBeenCalledWith({
       where: { id: 1 },
-      data: expect.objectContaining({ date: new Date(2026, 11, 31) }),
+      data: expect.objectContaining({ date: new Date(Date.UTC(2027, 0, 1)) }),
+    });
+  });
+
+  it('stores 2026-09-09 as the same business date without timezone shifting', async () => {
+    await service.createHoliday({ name: 'Ganesh Birthday', date: '2026-09-09' });
+
+    expect(prisma.holiday.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ date: new Date(Date.UTC(2026, 8, 9)) }),
+    });
+  });
+
+  it('matches only the same business day for isHoliday checks', async () => {
+    prisma.holiday.findFirst.mockResolvedValue({ id: 3, name: 'Ganesh Birthday', date: new Date(Date.UTC(2026, 8, 9)) });
+
+    await expect(service.isHoliday(new Date('2026-09-09T00:00:00.000Z'))).resolves.toEqual({
+      id: 3,
+      name: 'Ganesh Birthday',
+      date: new Date(Date.UTC(2026, 8, 9)),
+    });
+    await expect(service.isHoliday(new Date('2026-09-08T18:30:00.000Z'))).resolves.toEqual({
+      id: 3,
+      name: 'Ganesh Birthday',
+      date: new Date(Date.UTC(2026, 8, 9)),
+    });
+    expect(prisma.holiday.findFirst).toHaveBeenCalledWith({
+      where: { date: new Date(Date.UTC(2026, 8, 9)) },
     });
   });
 
@@ -197,7 +223,7 @@ describe('HolidaysService business dates', () => {
       where: { id: 1 },
       data: {
         name: 'Updated Day',
-        date: new Date(2026, 7, 16),
+        date: new Date(Date.UTC(2026, 7, 16)),
         description: 'Updated description',
         isOptional: false,
         location: 'Remote',
@@ -212,7 +238,7 @@ describe('HolidaysService business dates', () => {
     expect(prisma.holiday.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         name: 'New Year',
-        date: new Date(2026, 0, 1),
+        date: new Date(Date.UTC(2026, 0, 1)),
         isOptional: false,
       }),
     });

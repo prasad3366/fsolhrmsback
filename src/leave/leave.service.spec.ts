@@ -239,6 +239,7 @@ describe('LeaveService working-day calculation', () => {
       },
       leave: {
         findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn().mockResolvedValue({ id: 1 }),
       },
       leaveBalance: {
@@ -332,6 +333,7 @@ describe('LeaveService L5 validation', () => {
       leaveType: { findUnique: jest.fn().mockResolvedValue({ yearlyQuota: 20, requiresMedical: false }) },
       leave: {
         findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn().mockResolvedValue({ id: 1 }),
       },
       leaveBalance: {
@@ -536,6 +538,359 @@ describe('LeaveService L5 validation', () => {
     expect(pendingLeave.decisionByRole).toBeNull();
     expect(pendingLeave.decisionAt).toBeNull();
     expect(pendingLeave.decisionReason).toBeNull();
+  });
+});
+
+describe('LeaveService combined monthly paid leave rule', () => {
+  const makePrisma = () => ({
+    employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, user: {}, gender: 'MALE' }) },
+    leaveType: { findUnique: jest.fn(), findMany: jest.fn() },
+    leavePolicy: { findFirst: jest.fn() },
+    leave: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      create: jest.fn().mockResolvedValue({ id: 1 }),
+      findMany: jest.fn().mockResolvedValue([]),
+      aggregate: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findUnique: jest.fn(),
+    },
+    leaveBalance: {
+      findUnique: jest.fn().mockResolvedValue({ allocated: 20, carryForward: 0, used: 0 }),
+      create: jest.fn(),
+      update: jest.fn().mockResolvedValue({}),
+      upsert: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    $transaction: jest.fn(),
+  } as any);
+
+  const makeService = (prisma: any) => new LeaveService(prisma, {} as any, { canApproveOrRejectRequest: jest.fn().mockResolvedValue(true) } as any, {
+    getWorkingDates: jest.fn().mockImplementation(async (_employeeId: number, dates: Date[]) => dates),
+  } as any);
+
+  it('applies 2 paid days when Casual 2 is approved in one month', async () => {
+    const prisma = makePrisma();
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 1, name: 'Casual Leave', yearlyQuota: 10, requiresMedical: false });
+    prisma.leave.findMany.mockResolvedValue([]);
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await expect(service.applyLeave(7, {
+      leaveTypeId: 1,
+      startDate: '2026-09-04',
+      endDate: '2026-09-05',
+      durationType: 'FULL_DAY',
+      reason: 'Casual leave',
+    } as any)).resolves.toEqual({ id: 1 });
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 2, lopDays: 0 }),
+    }));
+  });
+
+  it('applies 2 paid days when Sick 2 is approved in one month', async () => {
+    const prisma = makePrisma();
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 2, name: 'Sick Leave', yearlyQuota: 10, requiresMedical: false });
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 2,
+      startDate: '2026-09-04',
+      endDate: '2026-09-05',
+      durationType: 'FULL_DAY',
+      reason: 'Sick leave',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 2, lopDays: 0 }),
+    }));
+  });
+
+  it('combines Casual 1 + Sick 1 into 2 paid, 0 LOP', async () => {
+    const prisma = makePrisma();
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 2, name: 'Sick Leave', yearlyQuota: 10, requiresMedical: false });
+    prisma.leave.findMany.mockResolvedValue([
+      { id: 10, employeeId: 7, status: 'APPROVED', leaveType: { name: 'Casual Leave' }, paidLeaveDays: 1, lopDays: 0, startDate: new Date(2026, 8, 1), endDate: new Date(2026, 8, 1) },
+    ]);
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 2,
+      startDate: '2026-09-02',
+      endDate: '2026-09-02',
+      durationType: 'FULL_DAY',
+      reason: 'Sick leave',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 1, lopDays: 0 }),
+    }));
+  });
+
+  it('marks the excess as LOP when combined monthly usage exceeds 2 paid days', async () => {
+    const prisma = makePrisma();
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 2, name: 'Sick Leave', yearlyQuota: 10, requiresMedical: false });
+    prisma.leave.findMany.mockResolvedValue([
+      { id: 10, employeeId: 7, status: 'APPROVED', leaveType: { name: 'Casual Leave' }, paidLeaveDays: 2, lopDays: 0, startDate: new Date(2026, 8, 1), endDate: new Date(2026, 8, 1) },
+    ]);
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 2,
+      startDate: '2026-09-02',
+      endDate: '2026-09-02',
+      durationType: 'FULL_DAY',
+      reason: 'Additional sick leave',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 0, lopDays: 1 }),
+    }));
+  });
+
+  it('still accepts Sick 3 as 1 paid and 2 LOP when only 1 day remains in the month', async () => {
+    const prisma = makePrisma();
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 2, name: 'Sick Leave', yearlyQuota: 10, requiresMedical: false });
+    prisma.leave.findMany.mockResolvedValue([
+      { id: 10, employeeId: 7, status: 'APPROVED', leaveType: { name: 'Sick Leave' }, paidLeaveDays: 1, lopDays: 0, startDate: new Date(2026, 8, 1), endDate: new Date(2026, 8, 1) },
+    ]);
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 2,
+      startDate: '2026-09-02',
+      endDate: '2026-09-04',
+      durationType: 'FULL_DAY',
+      reason: 'Sick leave span',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 1, lopDays: 2 }),
+    }));
+  });
+
+  it('counts only approved requests toward the monthly paid allowance', async () => {
+    const prisma = makePrisma();
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 1, name: 'Casual Leave', yearlyQuota: 10, requiresMedical: false });
+    prisma.leave.findMany.mockResolvedValue([
+      { id: 10, employeeId: 7, status: 'PENDING', leaveType: { name: 'Casual Leave' }, paidLeaveDays: 1, lopDays: 0, startDate: new Date(2026, 8, 1), endDate: new Date(2026, 8, 1) },
+      { id: 11, employeeId: 7, status: 'REJECTED', leaveType: { name: 'Sick Leave' }, paidLeaveDays: 1, lopDays: 0, startDate: new Date(2026, 8, 2), endDate: new Date(2026, 8, 2) },
+      { id: 12, employeeId: 7, status: 'CANCELLED', leaveType: { name: 'Sick Leave' }, paidLeaveDays: 1, lopDays: 0, startDate: new Date(2026, 8, 3), endDate: new Date(2026, 8, 3) },
+    ]);
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 1,
+      startDate: '2026-09-04',
+      endDate: '2026-09-04',
+      durationType: 'FULL_DAY',
+      reason: 'Casual leave',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 1, lopDays: 0 }),
+    }));
+  });
+
+  it('resets the 2-day paid allowance in a new calendar month', async () => {
+    const prisma = makePrisma();
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 1, name: 'Casual Leave', yearlyQuota: 10, requiresMedical: false });
+    prisma.leave.findMany.mockResolvedValue([
+      { id: 10, employeeId: 7, status: 'APPROVED', leaveType: { name: 'Casual Leave' }, paidLeaveDays: 2, lopDays: 0, startDate: new Date(2026, 8, 20), endDate: new Date(2026, 8, 20) },
+    ]);
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 1,
+      startDate: '2026-10-03',
+      endDate: '2026-10-03',
+      durationType: 'FULL_DAY',
+      reason: 'Casual leave in new month',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 1, lopDays: 0 }),
+    }));
+  });
+
+  it('keeps maternity leave governed by its separate rule', async () => {
+    const prisma = makePrisma();
+    prisma.employee.findUnique.mockResolvedValue({ id: 7, user: {}, gender: 'FEMALE' });
+    prisma.leaveType.findUnique.mockResolvedValue({ id: 3, name: 'Maternity Leave', yearlyQuota: 182, requiresMedical: false });
+    prisma.leave.findMany.mockResolvedValue([]);
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await service.applyLeave(7, {
+      leaveTypeId: 3,
+      startDate: '2026-09-04',
+      endDate: '2026-09-10',
+      durationType: 'FULL_DAY',
+      reason: 'Maternity leave',
+    } as any);
+
+    expect(prisma.leave.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 7, lopDays: 0 }),
+    }));
+  });
+
+  it('uses already-approved monthly leave usage when approving a pending casual request', async () => {
+    const prisma = makePrisma();
+    prisma.leave.findUnique.mockResolvedValueOnce({
+      id: 99,
+      employeeId: 7,
+      leaveTypeId: 1,
+      leaveType: { name: 'Casual Leave' },
+      yearStart: 2026,
+      totalDays: 2,
+      status: 'PENDING',
+      remarks: 'Approved',
+      isLossOfPay: false,
+      paidLeaveDays: 0,
+      lopDays: 0,
+      startDate: new Date(2026, 8, 1),
+      endDate: new Date(2026, 8, 2),
+    }).mockResolvedValueOnce({
+      id: 99,
+      employeeId: 7,
+      leaveTypeId: 1,
+      leaveType: { name: 'Casual Leave' },
+      yearStart: 2026,
+      totalDays: 2,
+      status: 'APPROVED',
+      remarks: 'Approved',
+      isLossOfPay: false,
+      paidLeaveDays: 0,
+      lopDays: 2,
+      startDate: new Date(2026, 8, 1),
+      endDate: new Date(2026, 8, 2),
+    });
+    prisma.leaveBalance.findUnique.mockResolvedValue({ allocated: 10, carryForward: 0, used: 0 });
+    prisma.leave.findMany.mockResolvedValue([
+      { id: 10, employeeId: 7, status: 'APPROVED', leaveType: { name: 'Casual Leave' }, paidLeaveDays: 2, lopDays: 0, startDate: new Date(2026, 8, 1), endDate: new Date(2026, 8, 1) },
+    ]);
+    prisma.employee.findUnique.mockResolvedValue({ id: 10 });
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(prisma));
+    const service = makeService(prisma);
+
+    await expect(service.approveLeave(99, 10, 'HR')).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
+    expect(prisma.leave.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ paidLeaveDays: 0, lopDays: 2 }),
+    }));
+  });
+});
+
+describe('LeaveService selfBalance maternity eligibility', () => {
+  it('excludes maternity leave for male employees while keeping Casual and Sick on the monthly combined pool', async () => {
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, gender: 'MALE' }) },
+      leaveType: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 1, name: 'Casual Leave', yearlyQuota: 10 },
+          { id: 2, name: 'Sick Leave', yearlyQuota: 8 },
+          { id: 3, name: 'Maternity Leave', yearlyQuota: 182 },
+        ]),
+      },
+      leavePolicy: { findFirst: jest.fn() },
+      leaveBalance: {
+        upsert: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      leave: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    } as any;
+
+    const service = new LeaveService(prisma, {} as any);
+
+    await expect(service.selfBalance(7, 2026)).resolves.toEqual([
+      {
+        leaveTypeId: 1,
+        id: 1,
+        leaveType: 'Casual Leave',
+        allocated: 2,
+        used: 0,
+        carryForward: 0,
+        remaining: 2,
+      },
+      {
+        leaveTypeId: 2,
+        id: 2,
+        leaveType: 'Sick Leave',
+        allocated: 2,
+        used: 0,
+        carryForward: 0,
+        remaining: 2,
+      },
+    ]);
+
+    expect(prisma.leaveBalance.upsert).not.toHaveBeenCalled();
+  });
+
+  it('includes maternity leave for eligible female employees while Casual and Sick stay on the monthly combined pool', async () => {
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 9, gender: 'FEMALE' }) },
+      leaveType: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 1, name: 'Casual Leave', yearlyQuota: 10 },
+          { id: 2, name: 'Sick Leave', yearlyQuota: 8 },
+          { id: 3, name: 'Maternity Leave', yearlyQuota: 182 },
+        ]),
+      },
+      leavePolicy: { findFirst: jest.fn() },
+      leaveBalance: {
+        upsert: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([
+          { employeeId: 9, leaveTypeId: 3, leaveType: { name: 'Maternity Leave' }, allocated: 182, used: 0, carryForward: 0 },
+        ]),
+      },
+      leave: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    } as any;
+
+    const service = new LeaveService(prisma, {} as any);
+
+    await expect(service.selfBalance(9, 2026)).resolves.toEqual([
+      {
+        leaveTypeId: 1,
+        id: 1,
+        leaveType: 'Casual Leave',
+        allocated: 2,
+        used: 0,
+        carryForward: 0,
+        remaining: 2,
+      },
+      {
+        leaveTypeId: 2,
+        id: 2,
+        leaveType: 'Sick Leave',
+        allocated: 2,
+        used: 0,
+        carryForward: 0,
+        remaining: 2,
+      },
+      {
+        leaveTypeId: 3,
+        id: 3,
+        leaveType: 'Maternity Leave',
+        allocated: 182,
+        used: 0,
+        carryForward: 0,
+        remaining: 182,
+      },
+    ]);
+
+    expect(prisma.leaveBalance.upsert).toHaveBeenCalledTimes(1);
+    expect(prisma.leaveBalance.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ leaveTypeId: 3 }),
+    }));
   });
 });
 

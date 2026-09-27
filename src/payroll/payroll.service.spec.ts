@@ -15,6 +15,7 @@ describe('PayrollService.addOther', () => {
       payrollAdjustment: {
         create: jest.fn(),
       },
+      $transaction: jest.fn(async (callback: any) => callback(prisma)),
     };
 
     employeesService = {};
@@ -29,6 +30,8 @@ describe('PayrollService.addOther', () => {
       grossSalary: 1000,
       deductions: 100,
       netSalary: 900,
+      otherAllowance: 0,
+      otherDeduction: 0,
       status: 'DRAFT',
     });
 
@@ -66,9 +69,43 @@ describe('PayrollService.addOther', () => {
     expect(prisma.payroll.update).toHaveBeenCalledWith({
       where: { id: 1 },
       data: {
+        otherAllowance: { increment: 200 },
+        otherDeduction: 0,
         grossSalary: 1200,
         deductions: 100,
         netSalary: 1100,
+      },
+    });
+  });
+
+  it('updates the persisted deduction component and net total', async () => {
+    prisma.payroll.findUnique.mockResolvedValue({
+      id: 1,
+      grossSalary: 1000,
+      deductions: 100,
+      netSalary: 900,
+      otherAllowance: 0,
+      otherDeduction: 0,
+      status: 'DRAFT',
+    });
+    prisma.payrollAdjustment.create.mockResolvedValue({});
+    prisma.payroll.update.mockResolvedValue({ id: 1, grossSalary: 1000, deductions: 300, netSalary: 700 });
+
+    await expect(service.addOther(1, 'Advance recovery', 'DEDUCTION', 200)).resolves.toEqual({
+      id: 1,
+      grossSalary: 1000,
+      deductions: 300,
+      netSalary: 700,
+    });
+
+    expect(prisma.payroll.update).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: {
+        otherAllowance: { increment: 0 },
+        otherDeduction: 200,
+        grossSalary: 1000,
+        deductions: 300,
+        netSalary: 700,
       },
     });
   });
@@ -87,6 +124,24 @@ describe('PayrollService.addOther', () => {
     );
 
     expect(prisma.payrollAdjustment.create).not.toHaveBeenCalled();
+    expect(prisma.payroll.update).not.toHaveBeenCalled();
+  });
+
+  it('finalizes a draft payroll explicitly', async () => {
+    prisma.payroll.findUnique.mockResolvedValue({ id: 1, status: 'DRAFT' });
+    prisma.payroll.update.mockResolvedValue({ id: 1, status: 'FINALIZED' });
+
+    await expect(service.finalizePayroll(1)).resolves.toEqual({ id: 1, status: 'FINALIZED' });
+    expect(prisma.payroll.update).toHaveBeenCalledWith({
+      where: { id: 1 },
+      data: { status: 'FINALIZED' },
+    });
+  });
+
+  it('does not finalize paid payroll', async () => {
+    prisma.payroll.findUnique.mockResolvedValue({ id: 1, status: 'PAID' });
+
+    await expect(service.finalizePayroll(1)).rejects.toThrow(BadRequestException);
     expect(prisma.payroll.update).not.toHaveBeenCalled();
   });
 
