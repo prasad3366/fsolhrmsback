@@ -363,7 +363,7 @@ export class AttendanceService {
     return authorizedEmployees.filter((employee): employee is NonNullable<typeof employee> => employee !== null);
   }
 
-   async getAttendanceHistory(
+  async getAttendanceHistory(
     userId: number,
     month?: number,
     year?: number,
@@ -393,172 +393,66 @@ export class AttendanceService {
     };
 
     if (!month || !year) {
-      const records = await this.prisma.attendanceRecord.findMany({
+      return this.prisma.attendanceRecord.findMany({
         where: { userId },
         orderBy: { date: 'asc' },
-      });
-
-      return records
+      }).then((records) => records
         .map((record) => this.effectiveRecord(record))
         .map((record) => this.withLocationLabel(record))
-        .filter((record) => !status || record.status === status);
+        .filter((record) => !status || record.status === status));
     }
 
     const { start: monthStart } = getMonthRange(year, month);
     const today = new Date();
     const todayKey = getBusinessDateKey(today).split('-').map(Number);
     const isCurrentMonth = year === todayKey[0] && month === todayKey[1];
-
-    if (monthStart >= getCurrentDayCutoff(today)) {
-      return shouldPaginate
-        ? paginate([], month, year)
-        : [];
-    }
-
+    if (monthStart >= getCurrentDayCutoff(today)) return shouldPaginate
+      ? paginate([], month, year)
+      : [];
     const monthDateKeys = new Set<string>();
     const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
     const endDay = isCurrentMonth ? todayKey[2] : lastDayOfMonth;
     const monthDates: Date[] = [];
-
     for (let day = 1; day <= endDay; day += 1) {
       const date = new Date(Date.UTC(year, month - 1, day, 12));
       monthDates.push(date);
       monthDateKeys.add(getBusinessDateKey(date));
     }
-
     const employee = this.prisma.employee?.findUnique
       ? await this.prisma.employee.findUnique({
           where: { userId },
           select: { id: true },
         })
       : null;
-
     if (!employee) {
       const records = await this.prisma.attendanceRecord.findMany({
         where: { userId },
       });
-
       const effectiveRecords = records
         .map((record) => this.effectiveRecord(record))
         .map((record) => this.withLocationLabel(record))
-        .filter((record) =>
-          monthDateKeys.has(
-            getBusinessDateKey(record.clockIn ?? record.date),
-          ),
-        );
-
+        .filter((record) => monthDateKeys.has(getBusinessDateKey(record.clockIn ?? record.date)));
       const filteredRecords = status
         ? effectiveRecords.filter((record) => record.status === status)
         : effectiveRecords;
-
       return paginate(filteredRecords, month, year);
     }
 
-    /*
-     * New attendance table.
-     */
-    const newRecords = (
-      await this.prisma.attendanceRecord.findMany({
-        where: { userId },
-      })
-    )
-      .map((record) => this.withLocationLabel(this.effectiveRecord(record)))
-      .filter((record) =>
-        monthDateKeys.has(
-          getBusinessDateKey(record.clockIn ?? record.date),
-        ),
-      );
-
-    /*
-     * Legacy attendance table.
-     *
-     * The old table is keyed by employeeId instead of userId.
-     * Convert the legacy record into the same shape used by the
-     * attendance history response.
-     */
-    const legacyRecords = await this.prisma.attendance.findMany({
-      where: {
-        employeeId: employee.id,
-      },
-      orderBy: { date: 'asc' },
-    });
-
-    const mappedLegacyRecords = legacyRecords
-      .filter((record) => monthDateKeys.has(getBusinessDateKey(record.date)))
-      .map((record) => ({
-        id: record.id,
-        userId,
-        userEmail: '',
-        date: toBusinessDate(record.date),
-        clockIn: record.punchIn,
-        clockOut: record.punchOut,
-        totalHours: record.totalHours,
-        isLate: false,
-        isEarlyCheckout: false,
-        ipAddress: null,
-        punchInLocationStatus: record.locationStatus,
-        punchOutLocationStatus: record.locationStatus,
-        notes: null,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
-        status: record.status,
-        locationLabel: this.locationLabel(
-          record.locationStatus,
-          record.locationStatus,
-        ),
-      }));
-
-    /*
-     * Merge by business date.
-     *
-     * New attendance_records take precedence over legacy Attendance
-     * when both contain the same attendance date.
-     */
-    const recordBusinessDateKey = (record: {
-      date: Date;
-      clockIn?: Date | null;
-    }) => getBusinessDateKey(record.clockIn ?? record.date);
-
-    const recordsByDate = new Map<string, any>();
-
-    for (const record of mappedLegacyRecords) {
-      recordsByDate.set(recordBusinessDateKey(record), record);
-    }
-
-    for (const record of newRecords) {
-      recordsByDate.set(recordBusinessDateKey(record), record);
-    }
-
-    const monthRecords = Array.from(recordsByDate.values());
-
-    const attendanceByDate = new Map(
-      monthRecords.map((record) => [
-        recordBusinessDateKey(record),
-        record,
-      ]),
+    const records = (await this.prisma.attendanceRecord.findMany({
+      where: { userId },
+    })).map((record) => this.withLocationLabel(this.effectiveRecord(record)));
+    const monthRecords = records.filter((record) =>
+      monthDateKeys.has(getBusinessDateKey(record.clockIn ?? record.date)),
     );
 
-    const statusByDate = await this.buildLeaveAwareStatusMap(
-      employee.id,
-      monthDates,
-      attendanceByDate,
-    );
-
-    const workingDates =
-      await this.workingDaysService.getWorkingDates(
-        employee.id,
-        monthDates,
-      );
-
-    const recordDates = new Set(
-      monthRecords.map(recordBusinessDateKey),
-    );
-
+    const recordBusinessDateKey = (record: { date: Date; clockIn?: Date | null }) =>
+      getBusinessDateKey(record.clockIn ?? record.date);
+    const attendanceByDate = new Map(monthRecords.map((record) => [recordBusinessDateKey(record), record]));
+    const statusByDate = await this.buildLeaveAwareStatusMap(employee.id, monthDates, attendanceByDate);
+    const workingDates = await this.workingDaysService.getWorkingDates(employee.id, monthDates);
+    const recordDates = new Set(monthRecords.map(recordBusinessDateKey));
     const inferredAbsences = workingDates
-      .filter(
-        (date) =>
-          !recordDates.has(getBusinessDateKey(date)),
-      )
+      .filter((date) => !recordDates.has(getBusinessDateKey(date)))
       .map((date) => ({
         userId,
         date,
@@ -572,20 +466,14 @@ export class AttendanceService {
       .map((record) => {
         const key = recordBusinessDateKey(record);
         const overrideStatus = statusByDate.get(key);
-
-        if (!overrideStatus) {
-          return record;
-        }
+        if (!overrideStatus) return record;
 
         const isLeaveOrAbsent =
           overrideStatus === AttendanceStatus.LEAVE ||
           overrideStatus === AttendanceStatus.ABSENT;
 
         if (record.clockIn) {
-          return {
-            ...record,
-            status: overrideStatus,
-          };
+          return { ...record, status: overrideStatus };
         }
 
         return isLeaveOrAbsent
@@ -596,29 +484,16 @@ export class AttendanceService {
               clockOut: null,
               totalHours: 0,
             }
-          : {
-              ...record,
-              status: overrideStatus,
-            };
+          : { ...record, status: overrideStatus };
       })
       .map((record) => this.withLocationLabel(record))
-      .sort(
-        (left, right) =>
-          left.date.getTime() - right.date.getTime(),
-      );
+      .sort((left, right) => left.date.getTime() - right.date.getTime());
 
     const filteredRecords = status
-      ? allRecords.filter(
-          (record) => record.status === status,
-        )
+      ? allRecords.filter((record) => record.status === status)
       : allRecords;
-
-    return paginate(
-      filteredRecords,
-      month,
-      year,
-    );
-  } 
+    return paginate(filteredRecords, month, year);
+  }
 
   async canAccessEmployeeAttendance(user: any, employeeId: number) {
     const role = String(user?.role ?? '').toUpperCase();

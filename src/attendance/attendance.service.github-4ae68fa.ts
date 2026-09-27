@@ -363,7 +363,7 @@ export class AttendanceService {
     return authorizedEmployees.filter((employee): employee is NonNullable<typeof employee> => employee !== null);
   }
 
-   async getAttendanceHistory(
+  async getAttendanceHistory(
     userId: number,
     month?: number,
     year?: number,
@@ -393,172 +393,66 @@ export class AttendanceService {
     };
 
     if (!month || !year) {
-      const records = await this.prisma.attendanceRecord.findMany({
+      return this.prisma.attendanceRecord.findMany({
         where: { userId },
         orderBy: { date: 'asc' },
-      });
-
-      return records
+      }).then((records) => records
         .map((record) => this.effectiveRecord(record))
         .map((record) => this.withLocationLabel(record))
-        .filter((record) => !status || record.status === status);
+        .filter((record) => !status || record.status === status));
     }
 
     const { start: monthStart } = getMonthRange(year, month);
     const today = new Date();
     const todayKey = getBusinessDateKey(today).split('-').map(Number);
     const isCurrentMonth = year === todayKey[0] && month === todayKey[1];
-
-    if (monthStart >= getCurrentDayCutoff(today)) {
-      return shouldPaginate
-        ? paginate([], month, year)
-        : [];
-    }
-
+    if (monthStart >= getCurrentDayCutoff(today)) return shouldPaginate
+      ? paginate([], month, year)
+      : [];
     const monthDateKeys = new Set<string>();
     const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
     const endDay = isCurrentMonth ? todayKey[2] : lastDayOfMonth;
     const monthDates: Date[] = [];
-
     for (let day = 1; day <= endDay; day += 1) {
       const date = new Date(Date.UTC(year, month - 1, day, 12));
       monthDates.push(date);
       monthDateKeys.add(getBusinessDateKey(date));
     }
-
     const employee = this.prisma.employee?.findUnique
       ? await this.prisma.employee.findUnique({
           where: { userId },
           select: { id: true },
         })
       : null;
-
     if (!employee) {
       const records = await this.prisma.attendanceRecord.findMany({
         where: { userId },
       });
-
       const effectiveRecords = records
         .map((record) => this.effectiveRecord(record))
         .map((record) => this.withLocationLabel(record))
-        .filter((record) =>
-          monthDateKeys.has(
-            getBusinessDateKey(record.clockIn ?? record.date),
-          ),
-        );
-
+        .filter((record) => monthDateKeys.has(getBusinessDateKey(record.clockIn ?? record.date)));
       const filteredRecords = status
         ? effectiveRecords.filter((record) => record.status === status)
         : effectiveRecords;
-
       return paginate(filteredRecords, month, year);
     }
 
-    /*
-     * New attendance table.
-     */
-    const newRecords = (
-      await this.prisma.attendanceRecord.findMany({
-        where: { userId },
-      })
-    )
-      .map((record) => this.withLocationLabel(this.effectiveRecord(record)))
-      .filter((record) =>
-        monthDateKeys.has(
-          getBusinessDateKey(record.clockIn ?? record.date),
-        ),
-      );
-
-    /*
-     * Legacy attendance table.
-     *
-     * The old table is keyed by employeeId instead of userId.
-     * Convert the legacy record into the same shape used by the
-     * attendance history response.
-     */
-    const legacyRecords = await this.prisma.attendance.findMany({
-      where: {
-        employeeId: employee.id,
-      },
-      orderBy: { date: 'asc' },
-    });
-
-    const mappedLegacyRecords = legacyRecords
-      .filter((record) => monthDateKeys.has(getBusinessDateKey(record.date)))
-      .map((record) => ({
-        id: record.id,
-        userId,
-        userEmail: '',
-        date: toBusinessDate(record.date),
-        clockIn: record.punchIn,
-        clockOut: record.punchOut,
-        totalHours: record.totalHours,
-        isLate: false,
-        isEarlyCheckout: false,
-        ipAddress: null,
-        punchInLocationStatus: record.locationStatus,
-        punchOutLocationStatus: record.locationStatus,
-        notes: null,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
-        status: record.status,
-        locationLabel: this.locationLabel(
-          record.locationStatus,
-          record.locationStatus,
-        ),
-      }));
-
-    /*
-     * Merge by business date.
-     *
-     * New attendance_records take precedence over legacy Attendance
-     * when both contain the same attendance date.
-     */
-    const recordBusinessDateKey = (record: {
-      date: Date;
-      clockIn?: Date | null;
-    }) => getBusinessDateKey(record.clockIn ?? record.date);
-
-    const recordsByDate = new Map<string, any>();
-
-    for (const record of mappedLegacyRecords) {
-      recordsByDate.set(recordBusinessDateKey(record), record);
-    }
-
-    for (const record of newRecords) {
-      recordsByDate.set(recordBusinessDateKey(record), record);
-    }
-
-    const monthRecords = Array.from(recordsByDate.values());
-
-    const attendanceByDate = new Map(
-      monthRecords.map((record) => [
-        recordBusinessDateKey(record),
-        record,
-      ]),
+    const records = (await this.prisma.attendanceRecord.findMany({
+      where: { userId },
+    })).map((record) => this.withLocationLabel(this.effectiveRecord(record)));
+    const monthRecords = records.filter((record) =>
+      monthDateKeys.has(getBusinessDateKey(record.clockIn ?? record.date)),
     );
 
-    const statusByDate = await this.buildLeaveAwareStatusMap(
-      employee.id,
-      monthDates,
-      attendanceByDate,
-    );
-
-    const workingDates =
-      await this.workingDaysService.getWorkingDates(
-        employee.id,
-        monthDates,
-      );
-
-    const recordDates = new Set(
-      monthRecords.map(recordBusinessDateKey),
-    );
-
+    const recordBusinessDateKey = (record: { date: Date; clockIn?: Date | null }) =>
+      getBusinessDateKey(record.clockIn ?? record.date);
+    const attendanceByDate = new Map(monthRecords.map((record) => [recordBusinessDateKey(record), record]));
+    const statusByDate = await this.buildLeaveAwareStatusMap(employee.id, monthDates, attendanceByDate);
+    const workingDates = await this.workingDaysService.getWorkingDates(employee.id, monthDates);
+    const recordDates = new Set(monthRecords.map(recordBusinessDateKey));
     const inferredAbsences = workingDates
-      .filter(
-        (date) =>
-          !recordDates.has(getBusinessDateKey(date)),
-      )
+      .filter((date) => !recordDates.has(getBusinessDateKey(date)))
       .map((date) => ({
         userId,
         date,
@@ -572,20 +466,14 @@ export class AttendanceService {
       .map((record) => {
         const key = recordBusinessDateKey(record);
         const overrideStatus = statusByDate.get(key);
-
-        if (!overrideStatus) {
-          return record;
-        }
+        if (!overrideStatus) return record;
 
         const isLeaveOrAbsent =
           overrideStatus === AttendanceStatus.LEAVE ||
           overrideStatus === AttendanceStatus.ABSENT;
 
         if (record.clockIn) {
-          return {
-            ...record,
-            status: overrideStatus,
-          };
+          return { ...record, status: overrideStatus };
         }
 
         return isLeaveOrAbsent
@@ -596,29 +484,16 @@ export class AttendanceService {
               clockOut: null,
               totalHours: 0,
             }
-          : {
-              ...record,
-              status: overrideStatus,
-            };
+          : { ...record, status: overrideStatus };
       })
       .map((record) => this.withLocationLabel(record))
-      .sort(
-        (left, right) =>
-          left.date.getTime() - right.date.getTime(),
-      );
+      .sort((left, right) => left.date.getTime() - right.date.getTime());
 
     const filteredRecords = status
-      ? allRecords.filter(
-          (record) => record.status === status,
-        )
+      ? allRecords.filter((record) => record.status === status)
       : allRecords;
-
-    return paginate(
-      filteredRecords,
-      month,
-      year,
-    );
-  } 
+    return paginate(filteredRecords, month, year);
+  }
 
   async canAccessEmployeeAttendance(user: any, employeeId: number) {
     const role = String(user?.role ?? '').toUpperCase();
@@ -706,152 +581,6 @@ export class AttendanceService {
       entityId: regularizationId,
       title: `Attendance regularization ${decisionText}`,
       message: `Your attendance regularization request has been ${decisionText}.`,
-    });
-  }
-
-  async addMissedAttendance(
-    dto: {
-      employeeId: number;
-      date: string;
-      clockIn: string;
-      clockOut: string;
-      reason?: string;
-    },
-    actor: AuthorizationUser,
-    ipAddress?: string,
-  ) {
-    const actorRole = String(actor?.role ?? '').toUpperCase();
-    if (!['SUPER_ADMIN', 'CEO', 'HR'].includes(actorRole)) {
-      throw new ForbiddenException('Access denied');
-    }
-
-    if (!this.authorizationService || typeof this.authorizationService.canAccessOrganizationWide !== 'function') {
-      throw new ForbiddenException('Access denied');
-    }
-
-    if (!this.authorizationService.canAccessOrganizationWide(actor, 'attendance')) {
-      throw new ForbiddenException('Access denied');
-    }
-
-    const employeeId = Number(dto.employeeId);
-    if (!Number.isInteger(employeeId) || employeeId <= 0) {
-      throw new BadRequestException('Invalid employee ID');
-    }
-
-    if (!dto.date || !dto.clockIn || !dto.clockOut) {
-      throw new BadRequestException('Date, clock-in, and clock-out are required');
-    }
-
-    const reason = typeof dto.reason === 'string' ? dto.reason.trim() : '';
-    if (!reason) {
-      throw new BadRequestException('A meaningful reason is required');
-    }
-
-    const targetDate = this.normalizeBusinessDateInput(dto.date);
-    const clockIn = new Date(dto.clockIn);
-    const clockOut = new Date(dto.clockOut);
-
-    if (Number.isNaN(clockIn.getTime()) || Number.isNaN(clockOut.getTime())) {
-      throw new BadRequestException('Clock-in and clock-out must be valid ISO timestamps');
-    }
-
-    const employee = await this.prisma.employee.findUnique({
-      where: { id: employeeId },
-      select: {
-        id: true,
-        userId: true,
-        status: true,
-        user: { select: { email: true } },
-      },
-    });
-
-    if (!employee) {
-      throw new NotFoundException('Employee not found');
-    }
-
-    if (employee.status !== EmployeeStatus.ACTIVE) {
-      throw new ForbiddenException('Employee is inactive');
-    }
-
-    const workingDates = await this.workingDaysService.getWorkingDates(employee.id, [targetDate]);
-    if (!workingDates.some((date) => getBusinessDateKey(date) === getBusinessDateKey(targetDate))) {
-      throw new BadRequestException('Missed attendance can only be recorded for a working day.');
-    }
-
-    const leaveRecord = this.prisma.leave?.findFirst
-      ? await this.prisma.leave.findFirst({
-          where: {
-            employeeId: employee.id,
-            status: 'APPROVED',
-            startDate: { lte: targetDate },
-            endDate: { gte: targetDate },
-          },
-        })
-      : null;
-
-    if (leaveRecord) {
-      throw new ConflictException('Cannot add missed attendance for a date with approved leave.');
-    }
-
-    const totalHours = (clockOut.getTime() - clockIn.getTime()) / 3600000;
-    if (!Number.isFinite(totalHours) || totalHours <= 0) {
-      throw new BadRequestException('Clock-out must be after clock-in');
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      const existingRecord = await tx.attendanceRecord.findUnique({
-        where: { userId_date: { userId: employee.userId, date: targetDate } },
-      });
-
-      const data = {
-        userId: employee.userId,
-        userEmail: employee.user?.email ?? '',
-        date: targetDate,
-        clockIn,
-        clockOut,
-        totalHours,
-        status: this.classifyCompletedDuration(totalHours),
-        ipAddress,
-        notes: reason,
-      };
-
-      try {
-        const record = existingRecord
-          ? await tx.attendanceRecord.update({
-              where: { id: existingRecord.id },
-              data,
-            })
-          : await tx.attendanceRecord.create({
-              data,
-            });
-
-        const previousPayload = existingRecord ? { ...existingRecord, reason: existingRecord.notes ?? null } : null;
-        const newPayload = { ...record, reason };
-
-        await tx.auditLog.create({
-          data: {
-            userId: actor?.id ?? null,
-            userEmail: actor?.email ?? employee.user?.email ?? 'system',
-            action: 'MISSED_ATTENDANCE_ADDED',
-            module: 'ATTENDANCE',
-            ipAddress,
-            previousVal: previousPayload ? JSON.stringify(previousPayload) : null,
-            newVal: JSON.stringify(newPayload),
-          },
-        });
-
-        return {
-          record,
-          message: existingRecord
-            ? 'Missed attendance updated successfully.'
-            : 'Missed attendance added successfully.',
-        };
-      } catch (error: any) {
-        if (error?.code === 'P2002') {
-          throw new ConflictException('Attendance has already been corrected for this employee and date.');
-        }
-        throw error;
-      }
     });
   }
 
@@ -976,11 +705,6 @@ export class AttendanceService {
     punchInLocationStatus?: string | null,
     punchOutLocationStatus?: string | null,
   ): string {
-    const hasRecordedLocation =
-      (punchInLocationStatus !== undefined && punchInLocationStatus !== null) ||
-      (punchOutLocationStatus !== undefined && punchOutLocationStatus !== null);
-
-    if (!hasRecordedLocation) return '—';
     if (punchInLocationStatus === 'OFFICE' && punchOutLocationStatus === 'OFFICE') return 'In Office';
     if (punchInLocationStatus === 'OFFICE' && punchOutLocationStatus === 'OUTSIDE') return 'Checked Out Outside Office';
     if (punchInLocationStatus === 'OUTSIDE' && punchOutLocationStatus === 'OFFICE') return 'Checked In Outside Office';
@@ -1160,30 +884,8 @@ export class AttendanceService {
     });
   }
 
-  private normalizeBusinessDateInput(date?: string) {
-    if (!date) return this.today();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      throw new BadRequestException('Date must be in YYYY-MM-DD format');
-    }
-
-    const parsed = new Date(`${date}T12:00:00Z`);
-    if (Number.isNaN(parsed.getTime())) {
-      throw new BadRequestException('Invalid date');
-    }
-
-    return this.attendanceDate(parsed);
-  }
-
-  getAll(date?: string) {
-    const normalizedDate = this.normalizeBusinessDateInput(date);
-    const today = this.today();
-
-    if (normalizedDate.getTime() > today.getTime()) {
-      throw new BadRequestException('Future attendance is not available');
-    }
-
+  getAll() {
     return this.prisma.attendanceRecord.findMany({
-      where: { date: normalizedDate },
       include: { user: { include: { employee: true } } },
       orderBy: { date: 'desc' },
     }).then((records) => records.map((record) => this.effectiveRecord(record)));
