@@ -227,12 +227,17 @@ export class PayrollService {
         workingDays,
         presentDays,
         lopDays,
+        paidLeaveDays,
 
-	    basic: calc.basic,
-	    hra: calc.hra,
-	specialAllowance: calc.specialAllowance,
+        basic: calc.basic,
+        hra: calc.hra,
+        conveyance: calc.conveyance,
+        specialAllowance: calc.specialAllowance,
+        otherAllowance: 0,
         pf: calc.pf,
-        pt: calc.pt,        leaveDeduction: calc.leaveDeduction,
+        pt: calc.pt,
+        leaveDeduction: calc.leaveDeduction,
+        otherDeduction: 0,
 
         grossSalary: calc.gross,
         deductions: calc.deductions,
@@ -368,28 +373,58 @@ export class PayrollService {
       throw new BadRequestException('Payroll is finalized and cannot be modified');
     }
 
-    const newDeductions =
-      payroll.deductions + (normalizedType === 'DEDUCTION' ? numericAmount : 0);
-    const newGross =
-      payroll.grossSalary + (normalizedType === 'ALLOWANCE' ? numericAmount : 0);
-    const newNet = newGross - newDeductions;
+    const isAllowance = normalizedType === 'ALLOWANCE';
+    const newGross = payroll.grossSalary + (isAllowance ? numericAmount : 0);
+    const newDeductions = payroll.deductions + (isAllowance ? 0 : numericAmount);
+    const existingOtherDeduction = payroll.otherDeduction ?? Math.max(
+      payroll.deductions - payroll.pf - payroll.pt - payroll.leaveDeduction,
+      0,
+    );
 
-    await this.prisma.payrollAdjustment.create({
-      data: {
-        payrollId: normalizedPayrollId,
-        name: normalizedName,
-        type: normalizedType as 'ALLOWANCE' | 'DEDUCTION',
-        amount: numericAmount,
-      },
+    return this.prisma.$transaction(async (transaction: any) => {
+      await transaction.payrollAdjustment.create({
+        data: {
+          payrollId: normalizedPayrollId,
+          name: normalizedName,
+          type: normalizedType as 'ALLOWANCE' | 'DEDUCTION',
+          amount: numericAmount,
+        },
+      });
+
+      return transaction.payroll.update({
+        where: { id: normalizedPayrollId },
+        data: {
+          otherAllowance: { increment: isAllowance ? numericAmount : 0 },
+          otherDeduction: existingOtherDeduction + (isAllowance ? 0 : numericAmount),
+          grossSalary: newGross,
+          deductions: newDeductions,
+          netSalary: newGross - newDeductions,
+        },
+      });
     });
+  }
+
+  async finalizePayroll(payrollId: number) {
+    const normalizedPayrollId = this.normalizePositiveInteger(payrollId, 'payrollId');
+    const payroll = await this.prisma.payroll.findUnique({
+      where: { id: normalizedPayrollId },
+    });
+
+    if (!payroll) {
+      throw new BadRequestException('Payroll not found');
+    }
+
+    if (payroll.status === 'PAID') {
+      throw new BadRequestException('Paid payroll cannot be finalized');
+    }
+
+    if (payroll.status === 'FINALIZED') {
+      return payroll;
+    }
 
     return this.prisma.payroll.update({
       where: { id: normalizedPayrollId },
-      data: {
-        grossSalary: newGross,
-        deductions: newDeductions,
-        netSalary: newNet,
-      },
+      data: { status: 'FINALIZED' },
     });
   }
 }

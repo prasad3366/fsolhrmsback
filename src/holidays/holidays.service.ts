@@ -1,4 +1,5 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { getBusinessDateKey } from '../attendance/utils/business-date.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateHolidayDto, UpdateHolidayDto } from './dto/holiday.dto';
 
@@ -7,28 +8,44 @@ export class HolidaysService {
   constructor(private prisma: PrismaService) {}
 
   private normalizeBusinessDate(value: string | Date): Date {
+    const businessDateKey = this.parseBusinessDateKey(value);
+    const [year, month, day] = businessDateKey.split('-').map(Number);
+    const normalized = new Date(Date.UTC(year, month - 1, day));
+
+    if (
+      normalized.getUTCFullYear() !== year ||
+      normalized.getUTCMonth() !== month - 1 ||
+      normalized.getUTCDate() !== day
+    ) {
+      throw new BadRequestException('Invalid holiday date');
+    }
+
+    return normalized;
+  }
+
+  private parseBusinessDateKey(value: string | Date): string {
     if (typeof value === 'string') {
-      const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
       if (dateOnly) {
         const year = Number(dateOnly[1]);
         const month = Number(dateOnly[2]);
         const day = Number(dateOnly[3]);
-        const normalized = new Date(year, month - 1, day);
+        const normalized = new Date(Date.UTC(year, month - 1, day));
         if (
-          normalized.getFullYear() !== year ||
-          normalized.getMonth() !== month - 1 ||
-          normalized.getDate() !== day
+          normalized.getUTCFullYear() !== year ||
+          normalized.getUTCMonth() !== month - 1 ||
+          normalized.getUTCDate() !== day
         ) {
           throw new BadRequestException('Invalid holiday date');
         }
-        return normalized;
+
+        return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       }
     }
 
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) throw new BadRequestException('Invalid holiday date');
-    date.setHours(0, 0, 0, 0);
-    return date;
+    return getBusinessDateKey(date);
   }
 
   private validateFields(data: Record<string, unknown>, required: string[] = []) {
@@ -82,8 +99,8 @@ export class HolidaysService {
   private async ensureDatePeriodUnlocked(date: Date) {
     const payroll = await this.prisma.payroll.findFirst({
       where: {
-        month: date.getMonth() + 1,
-        year: date.getFullYear(),
+        month: date.getUTCMonth() + 1,
+        year: date.getUTCFullYear(),
         status: { in: ['FINALIZED', 'PAID'] },
       },
       select: { id: true },
@@ -124,8 +141,8 @@ export class HolidaysService {
   // ✅ Get Holidays By Year
   async getHolidaysByYear(year: number) {
     this.validateYear(year);
-    const start = new Date(year, 0, 1);
-    const end = new Date(year + 1, 0, 1);
+    const start = new Date(Date.UTC(year, 0, 1));
+    const end = new Date(Date.UTC(year + 1, 0, 1));
 
     return this.prisma.holiday.findMany({
       where: {
@@ -208,17 +225,12 @@ export class HolidaysService {
   }
 
   // ✅ Used internally by attendance & leave
-  async isHoliday(date: Date) {
-    const start = this.normalizeBusinessDate(date);
-    const end = new Date(start);
-    end.setDate(end.getDate() + 1);
+  async isHoliday(date: Date | string) {
+    const normalizedDate = this.normalizeBusinessDate(date);
 
     return this.prisma.holiday.findFirst({
       where: {
-        date: {
-          gte: start,
-          lt: end,
-        },
+        date: normalizedDate,
       },
     });
   }

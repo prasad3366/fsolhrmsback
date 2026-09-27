@@ -80,6 +80,20 @@ describe('WorkingDaysService', () => {
     expect(holidayService.isHoliday).toHaveBeenCalledWith(holidayDate);
   });
 
+  it('evaluates the canonical business date for valid weekdays and weekend exclusions at the UTC boundary', async () => {
+    const holidayDate = new Date('2026-09-09T00:00:00.000Z');
+    const validWeekday = new Date('2026-09-08T18:30:00.000Z');
+    const normalSaturday = new Date('2026-09-04T18:30:00.000Z');
+    const sunday = new Date('2026-09-05T18:30:00.000Z');
+    const salesSaturday = new Date('2026-09-04T18:30:00.000Z');
+
+    const { service } = createService(null, [holidayDate]);
+    await expect(service.getWorkingDates(7, [validWeekday, normalSaturday, sunday, holidayDate])).resolves.toEqual([validWeekday]);
+
+    const salesTeam = createService('SALES', [holidayDate]);
+    await expect(salesTeam.service.getWorkingDates(7, [salesSaturday])).resolves.toEqual([salesSaturday]);
+  });
+
   it('uses the Asia/Kolkata weekday at a UTC date boundary', async () => {
     const { service } = createService(null);
 

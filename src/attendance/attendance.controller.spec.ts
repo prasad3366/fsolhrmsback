@@ -9,7 +9,8 @@ describe('AttendanceController history queries', () => {
     getMyAttendanceForEmployee: jest.fn(),
     getTodayStatusForEmployee: jest.fn(),
     getTodayAttendance: jest.fn(),
-      canAccessEmployeeAttendance: jest.fn().mockResolvedValue(true),
+    getAll: jest.fn(),
+    canAccessEmployeeAttendance: jest.fn().mockResolvedValue(true),
     punchIn: jest.fn(),
     punchOut: jest.fn(),
   } as unknown as jest.Mocked<AttendanceService>;
@@ -78,6 +79,18 @@ describe('AttendanceController history queries', () => {
       2026,
       AttendanceStatus.ABSENT,
     );
+  });
+
+  it('passes the selected dashboard business date to the org-wide attendance query', async () => {
+    const records = [{ id: 1, status: AttendanceStatus.PRESENT }];
+    service.getAll.mockResolvedValue(records as any);
+
+    await expect(controller.getAll(
+      { user: { id: 70, role: 'HR', employeeId: 7 } },
+      '2026-09-15',
+    )).resolves.toEqual(records);
+
+    expect(service.getAll).toHaveBeenCalledWith('2026-09-15');
   });
 
   it('allows an authorized team manager to request employee attendance', async () => {

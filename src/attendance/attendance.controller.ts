@@ -118,9 +118,9 @@ export class AttendanceController {
   @Get('all')
   @UseGuards(RolesGuard)
   @Roles('SUPER_ADMIN', 'CEO', 'HR')
-  getAll(@Req() req) {
+  getAll(@Req() req, @Query('date') date?: string) {
     this.ensureOrgWideAccess(req);
-    return this.service.getAll();
+    return this.service.getAll(date);
   }
 
   @Get('employees')
@@ -247,6 +247,24 @@ export class AttendanceController {
       query.status,
       page,
       pageSize,
+    );
+  }
+
+  @Post('employee/:id/missed-attendance')
+  @UseGuards(RolesGuard)
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
+  addMissedAttendance(@Req() req: any, @Param('id') id: string, @Body() dto: { date: string; clockIn: string; clockOut: string; reason?: string }) {
+    this.ensureOrgWideAccess(req);
+    return this.service.addMissedAttendance(
+      {
+        employeeId: Number(id),
+        date: dto.date,
+        clockIn: dto.clockIn,
+        clockOut: dto.clockOut,
+        reason: dto.reason,
+      },
+      req.user,
+      req.ip,
     );
   }
 

@@ -69,21 +69,30 @@ export class LeaveScheduler {
     const leaveTypes = await this.prisma.leaveType.findMany();
 
     const yearStart = getFinancialYearStart(new Date());
+    const eligibleTypes = leaveTypes.filter(
+      (type) => !['casual leave', 'sick leave'].includes(type.name.trim().toLowerCase()),
+    );
 
     const policies = await Promise.all(
-      leaveTypes.map((type) => this.prisma.leavePolicy.findUnique({
+      eligibleTypes.map((type) => this.prisma.leavePolicy.findUnique({
         where: { leaveTypeName: type.name },
         select: { annualAllocation: true },
       })),
     );
     const data = employees.flatMap((emp) =>
-      leaveTypes.map((type, index) => ({
-        employeeId: emp.id,
-        leaveTypeId: type.id,
-        allocated: policies[index]?.annualAllocation ?? type.yearlyQuota,
-        yearStart,
-      })),
+      eligibleTypes
+        .filter((type) => !type.name || type.name.toLowerCase() !== 'maternity leave' || emp.gender === 'FEMALE')
+        .map((type, index) => ({
+          employeeId: emp.id,
+          leaveTypeId: type.id,
+          allocated: policies[index]?.annualAllocation ?? type.yearlyQuota,
+          yearStart,
+        })),
     );
+
+    if (data.length === 0) {
+      return;
+    }
 
     await this.prisma.leaveBalance.createMany({
       data,

@@ -65,4 +65,38 @@ describe('DashboardService role read model', () => {
     expect(result.month).toEqual(expect.objectContaining({ presentDays: 1, halfDays: 1 }));
     expect(result).not.toHaveProperty('departmentSummary');
   });
+
+  it('preserves a real today attendance record when mapping HR dashboard rows to employees', async () => {
+    const prisma = {
+      employee: { count: jest.fn().mockResolvedValue(1), findUnique: jest.fn() },
+      attendanceRegularization: { count: jest.fn().mockResolvedValue(0) },
+      payroll: { findMany: jest.fn().mockResolvedValue([]) },
+      team: { findMany: jest.fn().mockResolvedValue([]) },
+      wFHRequest: { findMany: jest.fn().mockResolvedValue([]) },
+    } as any;
+    const attendance = {
+      getTodayStatus: jest.fn().mockResolvedValue({
+        hasPunchedIn: true,
+        hasPunchedOut: true,
+        punchInTime: '2026-09-16T09:00:00.000Z',
+        punchOutTime: '2026-09-16T18:30:00.000Z',
+        locationStatus: 'OFFICE',
+        totalHours: 9.5,
+        status: 'PRESENT',
+      }),
+      getAttendanceHistory: jest.fn(),
+    } as any;
+    const service = new DashboardService(
+      prisma,
+      { getWorkingDates: jest.fn().mockResolvedValue([new Date()]) } as any,
+      attendance,
+    );
+    const employee = { id: 9, userId: 90, empCode: 'E9', firstName: 'Real', lastName: 'Checkin', department: 'HR', status: 'ACTIVE' };
+
+    const result = await (service as any).getTodayWorkforce([employee]);
+
+    expect(attendance.getTodayStatus).toHaveBeenCalledWith(employee.userId, employee.id);
+    expect(result.present).toBe(1);
+    expect(result.byEmployee).toEqual([{ employeeId: employee.id, department: employee.department, status: 'PRESENT' }]);
+  });
 });

@@ -207,6 +207,43 @@ describe('DashboardService attendance export authorization', () => {
     expect(csv).toContain('E7,Test Employee,26,0,0,25,1');
   });
 
+  it('uses the authoritative leave-balance payload in the employee dashboard', async () => {
+    const prisma = {
+      employee: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 7,
+          userId: 70,
+          firstName: 'Test',
+          lastName: 'Employee',
+          department: 'Engineering',
+          status: 'ACTIVE',
+        }),
+      },
+      payroll: { findMany: jest.fn().mockResolvedValue([]) },
+      wFHRequest: { findMany: jest.fn().mockResolvedValue([]) },
+    } as any;
+    const attendanceService = {
+      getAttendanceHistory: jest.fn().mockResolvedValue([]),
+      getTodayStatus: jest.fn().mockResolvedValue({ status: 'PRESENT' }),
+    } as any;
+    const leaveService = {
+      selfBalance: jest.fn().mockResolvedValue([
+        { leaveTypeId: 1, id: 1, leaveType: 'Casual Leave', allocated: 10, used: 2, carryForward: 1, remaining: 9 },
+        { leaveTypeId: 2, id: 2, leaveType: 'Sick Leave', allocated: 8, used: 1, carryForward: 0, remaining: 7 },
+      ]),
+      selfLeaveHistory: jest.fn().mockResolvedValue([]),
+    } as any;
+    const service = new DashboardService(prisma, {} as any, attendanceService, leaveService);
+
+    const result = await (service as any).getEmployeeDashboard({ role: 'EMPLOYEE', employeeId: 7 });
+
+    expect(result.leaveBalance).toEqual([
+      { leaveTypeId: 1, id: 1, leaveType: 'Casual Leave', allocated: 10, used: 2, carryForward: 1, remaining: 9 },
+      { leaveTypeId: 2, id: 2, leaveType: 'Sick Leave', allocated: 8, used: 1, carryForward: 0, remaining: 7 },
+    ]);
+    expect(leaveService.selfBalance).toHaveBeenCalledWith(7, expect.any(Number));
+  });
+
   it('counts approved leave using the shared eligible working-day definition', async () => {
     const { service } = createCalculationService('SALES', [], [], [{
       employeeId: 7,

@@ -101,6 +101,12 @@ export class PayrollController {
     );
   }
 
+  @Post(':id/finalize')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
+  finalizePayroll(@Param('id') id: number) {
+    return this.payrollService.finalizePayroll(Number(id));
+  }
+
   /* Get payroll for specific employee */
 
   @Get()

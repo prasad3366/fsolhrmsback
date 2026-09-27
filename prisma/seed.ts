@@ -36,17 +36,17 @@ async function main() {
   const leaveTypes = [
     {
       name: 'Casual Leave',
-      yearlyQuota: 10,   // ✅ Correct according to policy
+      yearlyQuota: 2,
       carryForward: true,
       maxCarryLimit: 2,
       requiresMedical: false,
     },
     {
       name: 'Sick Leave',
-      yearlyQuota: 8,
+      yearlyQuota: 2,
       carryForward: true,
       maxCarryLimit: 1,
-      requiresMedical: true, // ✅ Medical certificate required
+      requiresMedical: true,
     },
     {
       name: 'Maternity Leave',
