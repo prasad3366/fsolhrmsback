@@ -198,7 +198,8 @@ export class DashboardService {
     const [today, leaveBalance, leaveHistory, payrolls, wfh] = await Promise.all([
       this.attendanceService.getTodayStatus(employee.userId, employee.id),
       this.leaveService?.selfBalance(employee.id, year) ?? [],
-      this.leaveService?.selfLeaveHistory(employee.id) ?? [],
+      // Type-only annotation: TypeScript 5.9 infers the bare [] fallback as never[]
+      this.leaveService?.selfLeaveHistory(employee.id) ?? ([] as Awaited<ReturnType<LeaveService['selfLeaveHistory']>>),
       this.prisma.payroll.findMany({ where: { employeeId: employee.id }, orderBy: [{ year: 'desc' }, { month: 'desc' }], take: 1 }),
       this.prisma.wFHRequest.findMany({ where: { employeeId: employee.id }, orderBy: { createdAt: 'desc' }, take: 10 }),
     ]);
