@@ -231,18 +231,13 @@ export class AuthorizationService {
     }
 
     const targetRole = this.normalizeRole(targetEmployee.user?.role);
-    const targetTeamName = String(targetEmployee.team?.name ?? '').toUpperCase();
 
     let allowedRoles: string[] = [];
 
     if (targetRole === 'EMPLOYEE') {
-      if (targetTeamName === 'IT') {
-        allowedRoles = ['IT_MANAGER', 'HR', 'SUPER_ADMIN', 'CEO'];
-      } else if (targetTeamName === 'SALES') {
-        allowedRoles = ['SALES_MANAGER', 'HR', 'SUPER_ADMIN', 'CEO'];
-      } else if (targetTeamName === 'FINANCE') {
-        allowedRoles = ['FINANCE_MANAGER', 'HR', 'SUPER_ADMIN', 'CEO'];
-      }
+      // HR, SUPER_ADMIN and CEO approve any employee regardless of team name;
+      // a manager role is limited below to teams it manages (Team.managerId)
+      allowedRoles = ['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER', 'HR', 'SUPER_ADMIN', 'CEO'];
     } else if (
       targetRole === 'IT_MANAGER' ||
       targetRole === 'SALES_MANAGER' ||

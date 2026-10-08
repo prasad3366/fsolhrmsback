@@ -17,6 +17,11 @@ import { WorkingDaysService } from '../common/working-days/working-days.service'
 import { ActionType, NotificationEntityType, Prisma } from '@prisma/client';
 import { LeaveDurationType } from '@prisma/client';
 import { NotificationService } from '../modules/notifications/notification.service';
+import {
+  assertPayrollPeriodOpen,
+  getBusinessDatesBetween,
+  markPayrollStale,
+} from '../payroll/payroll-period.util';
 
 const MAX_LEAVE_TEXT_LENGTH = 500;
 
@@ -90,10 +95,12 @@ export class LeaveService {
     leaveEmployeeId: number,
     actorEmployeeId: number,
     actorRole: string,
+    actorUserId?: number,
   ): Promise<boolean> {
     return this.authorizationService.canApproveOrRejectRequest(
       {
-        id: actorEmployeeId,
+        // Authenticated User ID for the active-user check (never the employee ID)
+        id: Number(actorUserId),
         role: actorRole,
         employeeId: actorEmployeeId,
       },
@@ -372,6 +379,7 @@ export class LeaveService {
     leaveId: number,
     approverEmployeeId: number,
     approverRole: string,
+    approverUserId?: number,
   ) {
     try {
       const approvedLeave = await this.prisma.$transaction(async (tx) => {
@@ -388,7 +396,7 @@ export class LeaveService {
         const approver = await tx.employee.findUnique({ where: { id: approverEmployeeId } });
         if (!approver) throw new BadRequestException('Approver not found');
 
-        if (!(await this.canManageTargetLeave(tx, leave.employeeId, approverEmployeeId, approverRole))) {
+        if (!(await this.canManageTargetLeave(tx, leave.employeeId, approverEmployeeId, approverRole, approverUserId))) {
           throw new BadRequestException('Unauthorized to approve leave');
         }
 
@@ -435,6 +443,9 @@ export class LeaveService {
           lopDays = Math.max(leave.totalDays - paidLeaveDays, 0);
         }
 
+        const leaveDates = getBusinessDatesBetween(new Date(leave.startDate), new Date(leave.endDate));
+        await assertPayrollPeriodOpen(tx, leave.employeeId, leaveDates);
+
         const decisionAt = new Date();
         const transition = await tx.leave.updateMany({
           where: { id: leaveId, status: 'PENDING' },
@@ -452,6 +463,8 @@ export class LeaveService {
         if (transition.count !== 1) {
           throw new BadRequestException('Leave already processed');
         }
+
+        await markPayrollStale(tx, leave.employeeId, leaveDates);
 
         await tx.leaveBalance.update({
           where: {
@@ -500,6 +513,7 @@ export class LeaveService {
     remarks: string,
     approverEmployeeId: number,
     approverRole: string,
+    approverUserId?: number,
   ) {
     if (typeof remarks !== 'string' || remarks.trim().length === 0) {
       throw new BadRequestException('Rejection remarks are required');
@@ -519,7 +533,7 @@ export class LeaveService {
 
         const approver = await tx.employee.findUnique({ where: { id: approverEmployeeId } });
         if (!approver) throw new BadRequestException('Approver not found');
-        if (!(await this.canManageTargetLeave(tx, leave.employeeId, approverEmployeeId, approverRole))) {
+        if (!(await this.canManageTargetLeave(tx, leave.employeeId, approverEmployeeId, approverRole, approverUserId))) {
           throw new BadRequestException('Unauthorized to reject leave');
         }
 
@@ -563,7 +577,7 @@ export class LeaveService {
     }
   }
 
-  async cancelLeave(id: number, actorEmployeeId: number, actorRole: string) {
+  async cancelLeave(id: number, actorEmployeeId: number, actorRole: string, actorUserId?: number) {
     try {
       return await this.prisma.$transaction(async (tx) => {
         const leave = await tx.leave.findUnique({ where: { id } });
@@ -576,14 +590,22 @@ export class LeaveService {
         const isOwner = leave.employeeId === actorEmployeeId;
         const canCancel = leave.status === 'PENDING'
           ? isOwner
-          : await this.canManageTargetLeave(tx, leave.employeeId, actorEmployeeId, role);
+          : await this.canManageTargetLeave(tx, leave.employeeId, actorEmployeeId, role, actorUserId);
         if (!canCancel) throw new ForbiddenException('Unauthorized to cancel leave');
+
+        // Only cancelling an APPROVED leave changes payroll
+        const leaveDates = leave.status === 'APPROVED'
+          ? getBusinessDatesBetween(new Date(leave.startDate), new Date(leave.endDate))
+          : [];
+        await assertPayrollPeriodOpen(tx, leave.employeeId, leaveDates);
 
         const transition = await tx.leave.updateMany({
           where: { id, status: leave.status },
           data: { status: 'CANCELLED' },
         });
         if (transition.count !== 1) throw new BadRequestException('Leave already processed');
+
+        await markPayrollStale(tx, leave.employeeId, leaveDates);
 
         if (leave.status === 'APPROVED') {
           const paidLeaveDays = Number(leave.paidLeaveDays ?? leave.totalDays ?? 0);

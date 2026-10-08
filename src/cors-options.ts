@@ -38,5 +38,7 @@ export function buildCorsOptions() {
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    // Lets the browser read download filenames (e.g. payslip PDFs)
+    exposedHeaders: ['Content-Disposition'],
   };
 }

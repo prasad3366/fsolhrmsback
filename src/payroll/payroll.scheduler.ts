@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
-import { PayrollCalculator } from './payroll.calculator';
+import { PayrollService } from './payroll.service';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
 import { getBusinessDateKey } from '../attendance/utils/business-date.util';
 
@@ -12,6 +12,7 @@ export class PayrollScheduler {
   constructor(
     private prisma: PrismaService,
     private workingDaysService: WorkingDaysService,
+    private payrollService: PayrollService,
   ) {}
 
   private async calculateApprovedLeaveDays(
@@ -59,7 +60,6 @@ export class PayrollScheduler {
     // Pay period is 29th-to-28th; the run on the 29th closes out the
     // period ending the day before (the 28th).
     const endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-    const startDate = new Date(endDate.getFullYear(), endDate.getMonth() - 1, 29);
     const month = endDate.getMonth() + 1;
     const year = endDate.getFullYear();
 
@@ -67,14 +67,6 @@ export class PayrollScheduler {
 
     const employees = await this.prisma.employee.findMany({
       where: { status: 'ACTIVE' },
-      include: {
-        salaries: {
-          where: { effectiveFrom: { lte: endDate } },
-          orderBy: { effectiveFrom: 'desc' },
-          take: 1,
-          include: { structure: true },
-        },
-      },
     });
 
     let generated = 0;
@@ -83,15 +75,6 @@ export class PayrollScheduler {
 
     for (const emp of employees) {
       try {
-        const salary = emp.salaries?.[0];
-        if (!salary) {
-          this.logger.warn(
-            `Skipping employee ${emp.empCode} (ID: ${emp.id}) - no salary configured`,
-          );
-          skipped++;
-          continue;
-        }
-
         const existing = await this.prisma.payroll.findFirst({
           where: { employeeId: emp.id, month, year },
         });
@@ -100,106 +83,22 @@ export class PayrollScheduler {
           continue;
         }
 
-        /* Working Days */
-
-        const dates: Date[] = [];
-        for (let date = new Date(startDate); date <= endDate; date.setDate(date.getDate() + 1)) {
-          dates.push(new Date(date));
-        }
-        const workingDays = (await this.workingDaysService.getWorkingDates(emp.id, dates)).length;
-
-        /* Attendance */
-
-        const attendanceRecords = await this.prisma.attendanceRecord.findMany({
-          where: {
-            userId: emp.userId,
-            date: { gte: startDate, lte: endDate },
-          },
-        });
-
-        let presentDays = 0;
-
-        for (const att of attendanceRecords) {
-          const clockIn = att?.clockIn ?? null;
-          const clockOut = att?.clockOut ?? null;
-
-          if (!clockIn || !clockOut) {
-            continue;
-          }
-
-          const totalHours = Number(
-            att?.totalHours ?? ((new Date(clockOut).getTime() - new Date(clockIn).getTime()) / 3600000),
-          );
-
-          if (totalHours < 4) continue;
-          if (totalHours < 7) presentDays += 0.5;
-          else presentDays += 1;
-        }
-
-        /* Leaves */
-
-        const leaves = await this.prisma.leave.findMany({
-          where: {
-            employeeId: emp.id,
-            status: 'APPROVED',
-            startDate: { lte: endDate },
-            endDate: { gte: startDate },
-          },
-        });
-
-        const paidLeaveDays = leaves.reduce(
-          (sum, leave) => sum + Number((leave as any).paidLeaveDays ?? 0),
-          0,
-        );
-        const leaveLopDays = leaves.reduce(
-          (sum, leave) => sum + Number((leave as any).lopDays ?? 0),
-          0,
-        );
-
-        /* Final */
-
-        const payableDays = presentDays + paidLeaveDays;
-        const attendanceLopDays = Math.max(workingDays - payableDays - leaveLopDays, 0);
-        const lopDays = leaveLopDays + attendanceLopDays;
-
-        /* Calc */
-
-        const calc = PayrollCalculator.calculate(
-          salary.monthlyCTC,
-          salary.structure,
-          workingDays,
-          lopDays,
-        );
-
-        /* Save */
-
-        await this.prisma.payroll.create({
-          data: {
-            employeeId: emp.id,
-            salaryId: salary.id,
-            month,
-            year,
-            workingDays,
-            presentDays,
-            lopDays,
-
-            basic: calc.basic,
-            hra: calc?.hra || 0,
-            specialAllowance: calc?.specialAllowance || 0,
-
-            pf: calc?.pf || 0,
-            pt: calc?.pt || 0,
-            leaveDeduction: calc?.leaveDeduction || 0,
-
-            grossSalary: calc?.gross || 0,
-            deductions: calc?.deductions || 0,
-            netSalary: calc?.netSalary || 0,
-          },
+        await this.payrollService.runPayroll({
+          employeeId: emp.id,
+          month,
+          year,
         });
 
         generated++;
       } catch (error) {
         const err = error as Error;
+        if (err.message === 'Salary not configured') {
+          this.logger.warn(
+            `Skipping employee ${emp.empCode} (ID: ${emp.id}) - no salary configured`,
+          );
+          skipped++;
+          continue;
+        }
         failed++;
         this.logger.error(
           `Failed to generate payroll for employee ${emp.empCode} (ID: ${emp.id}): ${err.message}`,

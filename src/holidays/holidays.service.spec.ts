@@ -7,6 +7,7 @@ describe('HolidaysService business dates', () => {
     },
     payroll: {
       findFirst: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
     holiday: {
       create: jest.fn(),

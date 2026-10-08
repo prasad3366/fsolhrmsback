@@ -14,7 +14,7 @@ describe('LeaveController rejection validation', () => {
       { remarks: 'Not approved' },
     )).resolves.toEqual({ id: 15 });
 
-    expect(service.rejectLeave).toHaveBeenCalledWith(15, 'Not approved', 10, 'HR');
+    expect(service.rejectLeave).toHaveBeenCalledWith(15, 'Not approved', 10, 'HR', 1);
   });
 
   it('validates rejection DTO content and preserves whitelist behavior', async () => {
@@ -42,7 +42,7 @@ describe('LeaveController rejection validation', () => {
     await expect(controller.approve({ user: { id: 1, role, employeeId: 10 } }, '15'))
       .resolves.toEqual({ id: 15 });
 
-    expect(service.approveLeave).toHaveBeenCalledWith(15, 10, role);
+    expect(service.approveLeave).toHaveBeenCalledWith(15, 10, role, 1);
   });
 
   it('rejects EMPLOYEE before an approval service call', async () => {

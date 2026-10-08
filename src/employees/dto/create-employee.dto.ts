@@ -6,6 +6,7 @@ import {
   IsDateString,
   IsNumber,
   IsBoolean,
+  Matches,
 } from 'class-validator';
 import {
   Role,
@@ -35,6 +36,7 @@ export class CreateEmployeeDto {
   declare department: string;
 
   @IsString()
+  @Matches(/\S/, { message: 'designation must not be blank' })
   designation!: string;
 
   @IsOptional()

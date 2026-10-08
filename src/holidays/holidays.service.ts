@@ -1,5 +1,6 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { getBusinessDateKey } from '../attendance/utils/business-date.util';
+import { getPayrollPeriodForDate, markPayrollStale } from '../payroll/payroll-period.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateHolidayDto, UpdateHolidayDto } from './dto/holiday.dto';
 
@@ -97,10 +98,11 @@ export class HolidaysService {
   }
 
   private async ensureDatePeriodUnlocked(date: Date) {
+    const { month, year } = getPayrollPeriodForDate(date);
     const payroll = await this.prisma.payroll.findFirst({
       where: {
-        month: date.getUTCMonth() + 1,
-        year: date.getUTCFullYear(),
+        month,
+        year,
         status: { in: ['FINALIZED', 'PAID'] },
       },
       select: { id: true },
@@ -122,7 +124,7 @@ export class HolidaysService {
     const date = this.normalizeBusinessDate(data.date);
     await this.ensureDatePeriodUnlocked(date);
     try {
-      return await this.prisma.holiday.create({
+      const holiday = await this.prisma.holiday.create({
         data: {
           name: data.name,
           date,
@@ -133,6 +135,8 @@ export class HolidaysService {
           ...(metadata?.branchId !== undefined && { branchId: metadata.branchId }),
         },
       });
+      await markPayrollStale(this.prisma, null, [date]);
+      return holiday;
     } catch (error) {
       this.rethrowDuplicate(error);
     }
@@ -174,7 +178,7 @@ export class HolidaysService {
     const updatedDate = data.date ? this.normalizeBusinessDate(data.date) : undefined;
     if (updatedDate) await this.ensureDatePeriodUnlocked(updatedDate);
     try {
-      return await this.prisma.holiday.update({
+      const holiday = await this.prisma.holiday.update({
         where: { id },
         data: {
           ...(data.name !== undefined && { name: data.name }),
@@ -184,6 +188,12 @@ export class HolidaysService {
           ...(data.location !== undefined && { location: data.location }),
         },
       });
+      await markPayrollStale(
+        this.prisma,
+        null,
+        updatedDate ? [existingHoliday.date, updatedDate] : [existingHoliday.date],
+      );
+      return holiday;
     } catch (error) {
       this.rethrowNotFound(error);
     }
@@ -201,6 +211,7 @@ export class HolidaysService {
     } catch (error) {
       this.rethrowNotFound(error);
     }
+    await markPayrollStale(this.prisma, null, [existingHoliday.date]);
 
     return returnDeleted ? existingHoliday : { message: 'Holiday deleted successfully' };
   }

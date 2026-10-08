@@ -561,6 +561,7 @@ describe('LeaveService combined monthly paid leave rule', () => {
       upsert: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([]),
     },
+    payroll: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
     $transaction: jest.fn(),
   } as any);
 
@@ -943,28 +944,29 @@ describe('LeaveService manager-scoped approval', () => {
 
   it('CEO approval is allowed when hierarchy permits', async () => {
     const { service, authorizationService } = createService('CEO', true);
-    await expect(service.approveLeave(15, 5, 'CEO')).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
-    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 5, role: 'CEO', employeeId: 5 }, 77);
+    // User ID (505) intentionally differs from employee ID (5)
+    await expect(service.approveLeave(15, 5, 'CEO', 505)).resolves.toEqual(expect.objectContaining({ status: 'APPROVED' }));
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 505, role: 'CEO', employeeId: 5 }, 77);
   });
 
   it.each(['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'])('wrong %s approval is rejected', async (role) => {
     const { service, authorizationService, prisma } = createService(role, false);
-    await expect(service.approveLeave(15, 999, role)).rejects.toThrow('Unauthorized to approve leave');
-    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 999, role, employeeId: 999 }, 77);
+    await expect(service.approveLeave(15, 999, role, 1999)).rejects.toThrow('Unauthorized to approve leave');
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 1999, role, employeeId: 999 }, 77);
     expect(prisma.leave.updateMany).not.toHaveBeenCalled();
   });
 
   it('manager self-approval is rejected', async () => {
     const { service, authorizationService, prisma } = createService('IT_MANAGER', false);
-    await expect(service.approveLeave(15, 77, 'IT_MANAGER')).rejects.toThrow('Unauthorized to approve leave');
-    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 77, role: 'IT_MANAGER', employeeId: 77 }, 77);
+    await expect(service.approveLeave(15, 77, 'IT_MANAGER', 1077)).rejects.toThrow('Unauthorized to approve leave');
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 1077, role: 'IT_MANAGER', employeeId: 77 }, 77);
     expect(prisma.leave.updateMany).not.toHaveBeenCalled();
   });
 
   it('employee self-approval is rejected', async () => {
     const { service, authorizationService, prisma } = createService('EMPLOYEE', false);
-    await expect(service.approveLeave(15, 77, 'EMPLOYEE')).rejects.toThrow('Unauthorized to approve leave');
-    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 77, role: 'EMPLOYEE', employeeId: 77 }, 77);
+    await expect(service.approveLeave(15, 77, 'EMPLOYEE', 1077)).rejects.toThrow('Unauthorized to approve leave');
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 1077, role: 'EMPLOYEE', employeeId: 77 }, 77);
     expect(prisma.leave.updateMany).not.toHaveBeenCalled();
   });
 
@@ -976,8 +978,8 @@ describe('LeaveService manager-scoped approval', () => {
 
   it('uses the shared approval method for manager rejection', async () => {
     const { service, authorizationService, prisma } = createService('IT_MANAGER', true, 'REJECTED');
-    await expect(service.rejectLeave(15, 'Not approved', 999, 'IT_MANAGER')).resolves.toEqual(expect.objectContaining({ status: 'REJECTED' }));
-    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 999, role: 'IT_MANAGER', employeeId: 999 }, 77);
+    await expect(service.rejectLeave(15, 'Not approved', 999, 'IT_MANAGER', 1999)).resolves.toEqual(expect.objectContaining({ status: 'REJECTED' }));
+    expect(authorizationService.canApproveOrRejectRequest).toHaveBeenCalledWith({ id: 1999, role: 'IT_MANAGER', employeeId: 999 }, 77);
     expect(prisma.leave.updateMany).toHaveBeenCalledWith({
       where: { id: 15, status: 'PENDING' },
       data: {

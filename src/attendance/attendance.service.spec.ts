@@ -220,6 +220,7 @@ describe('AttendanceService missed-attendance correction', () => {
         attendanceRecord,
         attendanceRegularization: { create: jest.fn().mockResolvedValue({ id: 1, status: 'APPROVED' }) },
         auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
+        payroll: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       })),
     } as any;
 
@@ -328,6 +329,7 @@ describe('AttendanceService missed-attendance correction', () => {
         update: jest.fn(),
       },
       auditLog: { create: auditLogCreate },
+      payroll: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       $transaction: jest.fn(async (callback: any) => callback(prisma)),
     } as any;
 
@@ -794,6 +796,53 @@ describe('AttendanceService punch transactions', () => {
   });
 });
 
+describe('AttendanceService payroll date-range history', () => {
+  it.each(['PENDING', 'REJECTED', 'CANCELLED'])(
+    'preserves completed work attendance over %s leave',
+    async (leaveStatus) => {
+      const date = new Date('2026-09-08T00:00:00.000Z');
+      const record = {
+        id: 1,
+        userId: 70,
+        date,
+        clockIn: new Date('2026-09-08T09:00:00.000Z'),
+        clockOut: new Date('2026-09-08T17:00:00.000Z'),
+        totalHours: 8,
+        status: AttendanceStatus.ABSENT,
+      };
+      const prisma = {
+        attendanceRecord: { findMany: jest.fn().mockResolvedValue([record]) },
+        leave: {
+          findMany: jest.fn().mockResolvedValue([{
+            status: leaveStatus,
+            startDate: date,
+            endDate: date,
+          }]),
+        },
+      } as any;
+      const workingDaysService = { getWorkingDates: jest.fn().mockResolvedValue([date]) } as any;
+      const service = new AttendanceService(prisma, {} as any, undefined as any, workingDaysService);
+
+      await expect(service.getAttendanceHistoryForDateRange(
+        70,
+        7,
+        date,
+        new Date('2026-09-09T00:00:00.000Z'),
+      )).resolves.toEqual([
+        expect.objectContaining({ id: 1, status: AttendanceStatus.PRESENT }),
+      ]);
+
+      expect(prisma.attendanceRecord.findMany).toHaveBeenCalledWith({
+        where: {
+          userId: 70,
+          date: { gte: date, lt: new Date('2026-09-09T00:00:00.000Z') },
+        },
+        orderBy: { date: 'asc' },
+      });
+    },
+  );
+});
+
 describe('AttendanceService historical reads', () => {
   it.each([
     [3 + 59 / 60, AttendanceStatus.ABSENT],
@@ -850,7 +899,7 @@ describe('AttendanceService historical reads', () => {
   });
 
   it.each([AttendanceStatus.PRESENT, AttendanceStatus.LATE])(
-    'interprets an open record stored as %s as IN_PROGRESS in history',
+    'interprets a check-in without check-out stored as %s as PRESENT in history',
     async (storedStatus) => {
       const date = new Date(2026, 8, 9);
       const prisma = {
@@ -866,7 +915,7 @@ describe('AttendanceService historical reads', () => {
       const service = new AttendanceService(prisma, {} as any);
 
       await expect(service.getAttendanceHistory(70)).resolves.toEqual([
-        expect.objectContaining({ date, status: AttendanceStatus.IN_PROGRESS }),
+        expect.objectContaining({ date, status: AttendanceStatus.PRESENT }),
       ]);
     },
   );
@@ -1240,7 +1289,7 @@ describe('AttendanceService historical reads', () => {
           clockIn,
           clockOut: null,
           totalHours: null,
-          status: AttendanceStatus.IN_PROGRESS,
+          status: AttendanceStatus.PRESENT,
         }),
       ]);
 
@@ -1293,7 +1342,7 @@ describe('AttendanceService historical reads', () => {
         clockIn: realRecord.clockIn,
         clockOut: null,
         totalHours: null,
-        status: AttendanceStatus.IN_PROGRESS,
+        status: AttendanceStatus.PRESENT,
         isLate: true,
       }));
     } finally {
@@ -1457,7 +1506,7 @@ describe('AttendanceService shared working-day integration', () => {
     );
   });
 
-  it('counts historical records by clock-in business date and treats open records as absent', async () => {
+  it('counts historical records by clock-in business date and treats a check-in without check-out as present', async () => {
     const workingDates = [
       new Date(Date.UTC(2026, 7, 3)),
       new Date(Date.UTC(2026, 7, 4)),
@@ -1490,9 +1539,9 @@ describe('AttendanceService shared working-day integration', () => {
 
     expect(result).toEqual(expect.objectContaining({
       workingDays: 4,
-      presentDays: 1,
+      presentDays: 2,
       halfDays: 1,
-      absentDays: 2,
+      absentDays: 1,
       leaveDays: 0,
     }));
     expect(result.workingDays).toBe(
@@ -1538,16 +1587,16 @@ describe('AttendanceService shared working-day integration', () => {
     expect(details.map((record) => record.status)).toEqual([
       AttendanceStatus.PRESENT,
       AttendanceStatus.HALF_DAY,
-      AttendanceStatus.IN_PROGRESS,
+      AttendanceStatus.PRESENT,
       AttendanceStatus.LEAVE,
       AttendanceStatus.ABSENT,
     ]);
     expect(summary).toEqual(expect.objectContaining({
       workingDays: 5,
-      presentDays: 1,
+      presentDays: 2,
       halfDays: 1,
       leaveDays: 1,
-      absentDays: 2,
+      absentDays: 1,
     }));
     expect(summary.workingDays).toBe(
       summary.presentDays + summary.halfDays + summary.absentDays + summary.leaveDays,
@@ -1618,9 +1667,9 @@ describe('AttendanceService shared working-day integration', () => {
     expect(salesSummary).toEqual(expect.objectContaining({
       employeeId: 8,
       workingDays: 3,
-      presentDays: 0,
+      presentDays: 1,
       halfDays: 1,
-      absentDays: 2,
+      absentDays: 1,
       leaveDays: 0,
     }));
     expect(normalSummary.workingDays).toBe(

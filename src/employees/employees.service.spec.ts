@@ -411,6 +411,9 @@ describe('EmployeesService employee creation transaction', () => {
         empCode: 'EMP-42',
         role: 'EMPLOYEE',
         firstName: 'New',
+        lastName: 'Employee',
+        department: 'Engineering',
+        designation: 'Developer',
         status,
       } as any;
 
@@ -429,6 +432,13 @@ describe('EmployeesService employee creation transaction', () => {
         }),
       });
       expect(employeeCreate).toHaveBeenCalledTimes(1);
+      expect(employeeCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          designation: 'Developer',
+          phone: undefined,
+          personalMobile: undefined,
+        }),
+      });
       expect(sendEmployeeCredentialsMock).toHaveBeenCalledWith(
         dto.email,
         expect.any(String),
@@ -436,6 +446,36 @@ describe('EmployeesService employee creation transaction', () => {
       );
     },
   );
+
+  it('rejects duplicate email without starting the transaction', async () => {
+    const transaction = jest.fn();
+    const prisma = {
+      user: { findUnique: jest.fn().mockResolvedValue({ id: 42 }) },
+      employee: { findUnique: jest.fn() },
+      $transaction: transaction,
+    } as unknown as PrismaService;
+    const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
+
+    await expect(
+      service.createEmployee({ email: 'existing@example.com' } as any, 'HR'),
+    ).rejects.toThrow('Email already exists');
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate employee code without starting the transaction', async () => {
+    const transaction = jest.fn();
+    const prisma = {
+      user: { findUnique: jest.fn().mockResolvedValue(null) },
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7 }) },
+      $transaction: transaction,
+    } as unknown as PrismaService;
+    const service = new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
+
+    await expect(
+      service.createEmployee({ email: 'new@example.com', empCode: 'EMP-42' } as any, 'HR'),
+    ).rejects.toThrow('Employee Code already exists');
+    expect(transaction).not.toHaveBeenCalled();
+  });
 
   it('rolls back the created user when employee creation fails', async () => {
     const committedUsers: unknown[] = [];
@@ -481,6 +521,7 @@ describe('EmployeesService employee creation transaction', () => {
           empCode: 'EMP-42',
           role: 'EMPLOYEE',
           firstName: 'New',
+          designation: 'Developer',
         } as any,
         'HR',
       ),
@@ -715,5 +756,29 @@ describe('EmployeesService generic update role hardening', () => {
         data: expect.objectContaining({ role: 'SUPER_ADMIN' }),
       }),
     );
+  });
+});
+
+describe('EmployeesService own details payroll visibility', () => {
+  const payrolls = [
+    { id: 1, status: 'DRAFT', month: 10, year: 2026 },
+    { id: 2, status: 'FINALIZED', month: 9, year: 2026 },
+    { id: 3, status: 'PAID', month: 8, year: 2026 },
+  ];
+  const createService = (role: string) => {
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, user: { role }, payrolls }) },
+    } as unknown as PrismaService;
+    return new EmployeesService(prisma, createMockMailService(), {} as AuthorizationService);
+  };
+
+  it('never returns DRAFT payroll to an EMPLOYEE', async () => {
+    const details = await createService('EMPLOYEE').getMyDetails(70);
+    expect(details.payrolls.map((payroll: any) => payroll.status)).toEqual(['FINALIZED', 'PAID']);
+  });
+
+  it.each(['HR', 'SUPER_ADMIN', 'CEO', 'FINANCE_MANAGER'])('keeps all own payroll records for %s', async (role) => {
+    const details = await createService(role).getMyDetails(70);
+    expect(details.payrolls).toHaveLength(3);
   });
 });

@@ -74,6 +74,8 @@ export class SalaryController {
       annualCTC?: number | string;
       annualCtc?: number | string;
       ctc?: number | string;
+      monthlyGross?: number | string;
+      effectiveFrom?: string;
       structureId?: number | string;
       salaryStructureId?: number | string;
     },
@@ -100,6 +102,22 @@ export class SalaryController {
   getSalaryStructures(@Req() req: any) {
     this.requireUser(req);
     return this.salaryService.getSalaryStructures();
+  }
+
+  @Post('structures')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
+  createSalaryStructure(
+    @Body()
+    body: {
+      name?: string;
+      basicPercent?: number | string;
+      hraPercent?: number | string;
+      conveyanceAmount?: number | string;
+    },
+    @Req() req: any,
+  ) {
+    this.requireUser(req);
+    return this.salaryService.createSalaryStructure(body ?? {});
   }
 
   @Get('employee/:employeeId')

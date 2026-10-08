@@ -165,7 +165,7 @@ describe('Attendance foundation', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
-  it('projects an open stored final status as IN_PROGRESS in today status', async () => {
+  it('reports a check-in without check-out as PRESENT while check-out stays available', async () => {
     const service = new AttendanceService({
       attendanceRecord: {
         findUnique: jest.fn().mockResolvedValue({
@@ -181,14 +181,14 @@ describe('Attendance foundation', () => {
     await expect(service.getTodayStatus(1)).resolves.toEqual(
       expect.objectContaining({
         state: 'IN_PROGRESS',
-        status: AttendanceStatus.IN_PROGRESS,
+        status: AttendanceStatus.PRESENT,
         clockedIn: true,
         clockedOut: false,
       }),
     );
   });
 
-  it('returns an authoritative IN_PROGRESS today-status payload', async () => {
+  it('returns an authoritative today-status payload for a check-in without check-out', async () => {
     const service = new AttendanceService({
       employee: {
         findUnique: jest.fn()
@@ -208,7 +208,7 @@ describe('Attendance foundation', () => {
     await expect(service.getTodayAttendance(7)).resolves.toEqual(
       expect.objectContaining({
         state: 'IN_PROGRESS',
-        status: AttendanceStatus.IN_PROGRESS,
+        status: AttendanceStatus.PRESENT,
         hasPunchedIn: true,
         hasPunchedOut: false,
         punchInTime: expect.any(Date),

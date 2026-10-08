@@ -1,0 +1,3 @@
+ALTER TABLE "Payroll"
+  ADD COLUMN "needsRecalculation" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "revision" INTEGER NOT NULL DEFAULT 0;
