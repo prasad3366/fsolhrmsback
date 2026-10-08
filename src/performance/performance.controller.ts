@@ -44,6 +44,12 @@ export class PerformanceController {
   }
 
   private hasOrgWidePerformanceAccess(user: AuthorizationUser): boolean {
+    const role = String(user?.role ?? '').toUpperCase();
+
+    if (['EMPLOYEE', 'IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'].includes(role)) {
+      return false;
+    }
+
     return this.authorizationService.canAccessOrganizationWide(user, 'employee');
   }
 

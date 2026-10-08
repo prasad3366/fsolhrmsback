@@ -63,10 +63,11 @@ describe('Leave master authorization and status rules', () => {
     canApproveOrRejectRequest.mockResolvedValue(false);
 
     await expect(
-      (serviceForAuthorization() as any).canManageTargetLeave(tx, 77, 999, 'SALES_MANAGER'),
+      (serviceForAuthorization() as any).canManageTargetLeave(tx, 77, 999, 'SALES_MANAGER', 1999),
     ).resolves.toBe(false);
+    // Authenticated user ID (1999), not the employee ID (999)
     expect(canApproveOrRejectRequest).toHaveBeenCalledWith(
-      actor('SALES_MANAGER', 999),
+      { id: 1999, role: 'SALES_MANAGER', employeeId: 999 },
       77,
     );
   });

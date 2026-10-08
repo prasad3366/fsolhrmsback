@@ -603,6 +603,91 @@ describe('AuthorizationService', () => {
     ).resolves.toBe(false);
   });
 
+  describe('leave approval for any employee (team-name independent)', () => {
+    const employeeIn = (team: { id: number; name: string; managerId: number } | null) => ({
+      id: 40,
+      teamId: team?.id ?? null,
+      team,
+      user: { role: 'EMPLOYEE' },
+    });
+
+    it.each([
+      ['HR', { id: 7, name: 'Marketing', managerId: 15 }],
+      ['SUPER_ADMIN', { id: 7, name: 'Marketing', managerId: 15 }],
+      ['CEO', { id: 7, name: 'Marketing', managerId: 15 }],
+      ['HR', null],
+      ['SUPER_ADMIN', null],
+      ['CEO', null],
+    ])('%s can approve an employee in team %j', async (role, team) => {
+      prisma.employee.findUnique.mockResolvedValueOnce(employeeIn(team));
+
+      await expect(
+        service.canApproveOrRejectRequest({ id: 1, role, employeeId: 20 }, 40),
+      ).resolves.toBe(true);
+      expect(prisma.team.findMany).not.toHaveBeenCalled();
+    });
+
+    it.each(['IT_MANAGER', 'SALES_MANAGER', 'FINANCE_MANAGER'])(
+      '%s who manages the employee team (Team.managerId) can approve, whatever the team name',
+      async (role) => {
+        prisma.employee.findUnique.mockResolvedValueOnce(employeeIn({ id: 7, name: 'Marketing', managerId: 15 }));
+        prisma.team.findMany.mockResolvedValueOnce([{ id: 7 }]);
+
+        await expect(
+          service.canApproveOrRejectRequest({ id: 1, role, employeeId: 15 }, 40),
+        ).resolves.toBe(true);
+        expect(prisma.team.findMany).toHaveBeenCalledWith({ where: { managerId: 15 }, select: { id: true } });
+      },
+    );
+
+    it('a manager of a different team is denied', async () => {
+      prisma.employee.findUnique.mockResolvedValueOnce(employeeIn({ id: 7, name: 'Marketing', managerId: 15 }));
+      prisma.team.findMany.mockResolvedValueOnce([{ id: 8 }]);
+
+      await expect(
+        service.canApproveOrRejectRequest({ id: 1, role: 'SALES_MANAGER', employeeId: 16 }, 40),
+      ).resolves.toBe(false);
+    });
+
+    it('a manager is denied for an employee without a team', async () => {
+      prisma.employee.findUnique.mockResolvedValueOnce(employeeIn(null));
+      prisma.team.findMany.mockResolvedValueOnce([{ id: 8 }]);
+
+      await expect(
+        service.canApproveOrRejectRequest({ id: 1, role: 'IT_MANAGER', employeeId: 16 }, 40),
+      ).resolves.toBe(false);
+    });
+
+    it.each(['HR', 'SUPER_ADMIN', 'CEO', 'IT_MANAGER'])('%s cannot approve their own leave', async (role) => {
+      await expect(
+        service.canApproveOrRejectRequest({ id: 1, role, employeeId: 40 }, 40),
+      ).resolves.toBe(false);
+      expect(prisma.employee.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('checks the authenticated User ID, not the employee ID, for the active-user rule', async () => {
+      // Employee 20 belongs to User 500; User 20 is someone else and inactive
+      prisma.user.findUnique.mockImplementation(async ({ where }: any) => (
+        where.id === 500
+          ? { id: 500, isActive: true, employee: { id: 20, status: 'ACTIVE' } }
+          : { id: where.id, isActive: false, employee: null }
+      ));
+      prisma.employee.findUnique.mockResolvedValueOnce(employeeIn({ id: 7, name: 'Marketing', managerId: 15 }));
+
+      await expect(
+        service.canApproveOrRejectRequest({ id: 500, role: 'HR', employeeId: 20 }, 40),
+      ).resolves.toBe(true);
+      expect(prisma.user.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 500 } }));
+      expect(prisma.user.findUnique).not.toHaveBeenCalledWith(expect.objectContaining({ where: { id: 20 } }));
+    });
+
+    it('denies when the authenticated user is missing', async () => {
+      await expect(
+        service.canApproveOrRejectRequest({ id: Number(undefined), role: 'HR', employeeId: 20 }, 40),
+      ).resolves.toBe(false);
+    });
+  });
+
   it('allows org-wide roles to access a team', async () => {
     await expect(
       service.canAccessTeam({ id: 1, role: 'CEO', employeeId: 5 }, 42),

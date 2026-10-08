@@ -84,7 +84,7 @@ export class LeaveController {
   @Patch('approve/:id')
   async approve(@Req() req, @Param('id') id: string) {
     await this.assertLeaveManagementAccess(req);
-    return this.service.approveLeave(+id, req.user.employeeId, req.user.role);
+    return this.service.approveLeave(+id, req.user.employeeId, req.user.role, req.user.id);
   }
 
   @Patch('reject/:id')
@@ -94,14 +94,14 @@ export class LeaveController {
     @Body() dto: RejectLeaveDto,
   ) {
     return this.assertLeaveManagementAccess(req).then(() =>
-      this.service.rejectLeave(+id, dto.remarks, req.user.employeeId, req.user.role),
+      this.service.rejectLeave(+id, dto.remarks, req.user.employeeId, req.user.role, req.user.id),
     );
   }
 
   @Patch('cancel/:id')
   async cancel(@Req() req, @Param('id') id: string) {
     const employeeId = this.getAuthenticatedEmployeeId(req);
-    return this.service.cancelLeave(+id, employeeId, req.user.role);
+    return this.service.cancelLeave(+id, employeeId, req.user.role, req.user.id);
   }
 
   @Get('history')

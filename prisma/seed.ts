@@ -87,6 +87,26 @@ async function main() {
       },
     });
     console.log('✅ Default salary structure created.');
+  }
+
+  const standardGrossStructure = await prisma.salaryStructure.findFirst({
+    where: { name: 'Standard Gross Structure' },
+  });
+  if (!standardGrossStructure) {
+    await prisma.salaryStructure.create({
+      data: {
+        name: 'Standard Gross Structure',
+        basicPercent: 35,
+        hraPercent: 40,
+        pfPercent: 12,
+        conveyancePercent: 0,
+        conveyanceAmount: 2000,
+        ptAmount: 200,
+        healthInsurance: 0,
+        pfBase: 0,
+      },
+    });
+    console.log('✅ Standard gross salary structure created.');
   } else {
     console.log('Salary structures already exist. Skipping default creation.');
   }

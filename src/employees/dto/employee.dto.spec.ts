@@ -1,7 +1,54 @@
 import { validate } from 'class-validator';
-import { UpdateEmployeeDto } from './create-employee.dto';
+import { CreateEmployeeDto, UpdateEmployeeDto } from './create-employee.dto';
 
 describe('Employee DTO validation', () => {
+  it('retains a required designation with whitelist validation', async () => {
+    const dto = Object.assign(new CreateEmployeeDto(), {
+      email: 'new@example.com',
+      role: 'EMPLOYEE',
+      empCode: 'EMP-42',
+      firstName: 'New',
+      lastName: 'Employee',
+      department: 'Engineering',
+      designation: 'Developer',
+      unexpectedField: 'removed',
+    });
+
+    await expect(validate(dto, { whitelist: true })).resolves.toHaveLength(0);
+    expect(dto.designation).toBe('Developer');
+    expect(dto).not.toHaveProperty('unexpectedField');
+  });
+
+  it.each([undefined, '', '   '])('rejects missing or blank designation: %s', async (designation) => {
+    const dto = Object.assign(new CreateEmployeeDto(), {
+      email: 'new@example.com',
+      role: 'EMPLOYEE',
+      empCode: 'EMP-42',
+      firstName: 'New',
+      lastName: 'Employee',
+      department: 'Engineering',
+      designation,
+    });
+
+    const errors = await validate(dto, { whitelist: true });
+
+    expect(errors.map((error) => error.property)).toContain('designation');
+  });
+
+  it('allows a create DTO to omit optional phone fields', async () => {
+    const dto = Object.assign(new CreateEmployeeDto(), {
+      email: 'new@example.com',
+      role: 'EMPLOYEE',
+      empCode: 'EMP-42',
+      firstName: 'New',
+      lastName: 'Employee',
+      department: 'Engineering',
+      designation: 'Developer',
+    });
+
+    await expect(validate(dto, { whitelist: true })).resolves.toHaveLength(0);
+  });
+
   it('retains and validates optional model-backed fields', async () => {
     const dto = Object.assign(new UpdateEmployeeDto(), {
       sourceOfHire: 'Referral',

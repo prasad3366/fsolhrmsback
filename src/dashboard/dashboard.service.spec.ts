@@ -170,7 +170,7 @@ describe('DashboardService attendance export authorization', () => {
     expect(csv).toContain('E7,Test Employee,25,0,0');
   });
 
-  it('does not count open PRESENT or LATE records as present', async () => {
+  it('counts a check-in without check-out as present', async () => {
     const { service } = createCalculationService(null, [], [
       { employeeId: 7, date: new Date(2026, 7, 3), status: 'PRESENT', clockIn: new Date(2026, 7, 3, 9), clockOut: null },
       { employeeId: 7, date: new Date(2026, 7, 6), status: 'LATE', clockIn: new Date(2026, 7, 6, 10), clockOut: null },
@@ -179,7 +179,7 @@ describe('DashboardService attendance export authorization', () => {
 
     const csv = await service.exportAttendanceCsv(8, 2026, { role: 'HR', employeeId: 10 });
 
-    expect(csv).toContain('E7,Test Employee,21,1,0');
+    expect(csv).toContain('E7,Test Employee,21,3,0,18,0');
   });
 
   it('uses the canonical completed-duration thresholds for Dashboard attendance', async () => {

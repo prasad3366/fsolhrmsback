@@ -30,4 +30,8 @@ describe('buildCorsOptions', () => {
 
     expect(isAllowed).toBe(false);
   });
+
+  it('exposes Content-Disposition so the browser can use the payslip filename', () => {
+    expect(buildCorsOptions().exposedHeaders).toEqual(['Content-Disposition']);
+  });
 });

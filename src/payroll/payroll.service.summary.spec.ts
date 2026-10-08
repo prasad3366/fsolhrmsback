@@ -26,6 +26,11 @@ describe('PayrollService Employee 360 payroll summary', () => {
     ]);
   });
 
+  it.each(['HR', 'SUPER_ADMIN', 'CEO', 'FINANCE_MANAGER'])('keeps all payroll statuses for %s', async (role) => {
+    await service.getEmployee360PayrollSummary({ id: 2, role, employeeId: 3 }, 7);
+    expect(payrollFindMany).toHaveBeenCalledWith(expect.objectContaining({ where: { employeeId: 7 } }));
+  });
+
   it('allows an EMPLOYEE to retrieve their own minimal payroll summary', async () => {
     const user = { id: 1, role: 'EMPLOYEE', employeeId: 7 };
 
@@ -42,8 +47,9 @@ describe('PayrollService Employee 360 payroll summary', () => {
     ]);
 
     expect(authorizationService.canAccessEmployee).toHaveBeenCalledWith(user, 7);
+    // EMPLOYEE never receives DRAFT payroll figures
     expect(payrollFindMany).toHaveBeenCalledWith({
-      where: { employeeId: 7 },
+      where: { employeeId: 7, status: { in: ['FINALIZED', 'PAID'] } },
       select: {
         month: true,
         year: true,

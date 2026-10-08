@@ -9,6 +9,7 @@ import {
   AuthorizationUser,
 } from '../common/authorization/authorization.service';
 import { EmployeeDirectoryQueryDto } from './dto/employee-directory-query.dto';
+import { EMPLOYEE_VISIBLE_PAYROLL_STATUSES } from '../payroll/payroll-period.util';
 
 @Injectable()
 export class EmployeesService {
@@ -244,6 +245,15 @@ export class EmployeesService {
 
     if (!employee) {
       throw new BadRequestException('Employee not found');
+    }
+
+    // Employees never see DRAFT payroll figures, including their own
+    if (String(employee.user?.role ?? '').toUpperCase() === 'EMPLOYEE') {
+      return {
+        ...employee,
+        payrolls: (employee.payrolls ?? []).filter((payroll) =>
+          EMPLOYEE_VISIBLE_PAYROLL_STATUSES.includes(payroll.status)),
+      };
     }
 
     return employee;

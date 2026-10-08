@@ -21,7 +21,7 @@ describe('PayrollScheduler approved leave working-day calculation', () => {
       ),
     } as any;
     const workingDaysService = new WorkingDaysService(prisma, holidayService);
-    const scheduler = new PayrollScheduler({} as any, workingDaysService);
+    const scheduler = new PayrollScheduler({} as any, workingDaysService, { runPayroll: jest.fn() } as any);
 
     return { scheduler, workingDaysService };
   };
@@ -60,5 +60,27 @@ describe('PayrollScheduler approved leave working-day calculation', () => {
     ).resolves.toBe(0);
 
     expect(getWorkingDates).toHaveBeenCalledWith(7, [expect.any(Date), expect.any(Date)]);
+  });
+
+  it('delegates scheduled generation to the shared payroll calculation', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-29T00:00:00.000Z'));
+    const prisma = {
+      employee: { findMany: jest.fn().mockResolvedValue([{ id: 7, empCode: 'E7' }]) },
+      payroll: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as any;
+    const payrollService = { runPayroll: jest.fn().mockResolvedValue({ id: 3 }) } as any;
+    const scheduler = new PayrollScheduler(prisma, {} as any, payrollService);
+
+    try {
+      await scheduler.autoGeneratePayroll();
+
+      expect(payrollService.runPayroll).toHaveBeenCalledWith({
+        employeeId: 7,
+        month: 9,
+        year: 2026,
+      });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

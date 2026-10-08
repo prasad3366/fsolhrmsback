@@ -17,6 +17,41 @@ import {
   AuthorizationService,
   AuthorizationUser,
 } from '../common/authorization/authorization.service';
+import { getBusinessDateKey } from '../attendance/utils/business-date.util';
+import {
+  EMPLOYEE_VISIBLE_PAYROLL_STATUSES,
+  getPayrollPeriodDates,
+  getPayrollPeriodRange,
+} from './payroll-period.util';
+
+const PAYROLL_CORRECTION_ROLES = ['SUPER_ADMIN', 'CEO', 'HR'];
+
+/* Persisted payroll fields compared by the recalculation preview */
+const PAYROLL_FINANCIAL_FIELDS = [
+  'salaryId',
+  'workingDays',
+  'presentDays',
+  'lopDays',
+  'paidLeaveDays',
+  'basic',
+  'hra',
+  'conveyance',
+  'specialAllowance',
+  'otherAllowance',
+  'pf',
+  'pt',
+  'leaveDeduction',
+  'otherDeduction',
+  'grossSalary',
+  'deductions',
+  'netSalary',
+] as const;
+
+const attendanceContribution = (status: AttendanceStatus | string | undefined) => {
+  if (status === AttendanceStatus.PRESENT || status === AttendanceStatus.LATE) return 1;
+  if (status === AttendanceStatus.HALF_DAY) return 0.5;
+  return 0;
+};
 
 @Injectable()
 export class PayrollService {
@@ -37,14 +72,27 @@ export class PayrollService {
     );
   }
 
-  private async calculateWorkingDays(employeeId: number, startDate: Date, endDate: Date) {
+  private async getPeriodWorkingDates(employeeId: number, startDate: Date, endDate: Date) {
     const dates: Date[] = [];
-    for (let date = new Date(startDate); date <= endDate; date.setDate(date.getDate() + 1)) {
+    for (let date = new Date(startDate); date <= endDate; date.setUTCDate(date.getUTCDate() + 1)) {
       dates.push(new Date(date));
     }
 
-    const workingDates = await this.workingDaysService.getWorkingDates(employeeId, dates);
-    return workingDates.length;
+    return this.workingDaysService.getWorkingDates(employeeId, dates);
+  }
+
+  private async calculateWorkingDays(employeeId: number, startDate: Date, endDate: Date) {
+    return (await this.getPeriodWorkingDates(employeeId, startDate, endDate)).length;
+  }
+
+  private auditActor(actor?: AuthorizationUser) {
+    return { userId: actor?.id ?? null, userEmail: actor?.email ?? 'system' };
+  }
+
+  private ensurePayrollCorrectionRole(actor?: AuthorizationUser) {
+    if (!PAYROLL_CORRECTION_ROLES.includes(String(actor?.role ?? '').toUpperCase())) {
+      throw new ForbiddenException('Access denied');
+    }
   }
 
   private normalizePositiveInteger(value: unknown, fieldName: string): number {
@@ -135,10 +183,192 @@ export class PayrollService {
   }
 
   private async computePayroll(employeeId: number, month: number, year: number) {
-    /* Date Range */
+    const data = await this.calculatePayrollData(employeeId, month, year);
+    return this.prisma.payroll.create({ data });
+  }
 
-    const startDate = new Date(year, month - 1, 1);
-    const endDate = new Date(year, month, 0);
+  async recalculatePayroll(payrollId: number, actor?: AuthorizationUser) {
+    const normalizedPayrollId = this.normalizePositiveInteger(payrollId, 'payrollId');
+    const existingPayroll = await this.prisma.payroll.findUnique({
+      where: { id: normalizedPayrollId },
+      include: { others: true },
+    });
+
+    if (!existingPayroll) {
+      throw new BadRequestException('Payroll not found');
+    }
+
+    if (existingPayroll.status !== 'DRAFT') {
+      throw new BadRequestException('Only draft payroll can be recalculated');
+    }
+
+    const data = await this.calculatePayrollData(
+      existingPayroll.employeeId,
+      existingPayroll.month,
+      existingPayroll.year,
+      existingPayroll,
+    );
+
+    try {
+      return await this.prisma.$transaction(async (tx: any) => {
+        const updatedPayroll = await tx.payroll.update({
+          where: { id: normalizedPayrollId, status: 'DRAFT' },
+          data: { ...data, needsRecalculation: false },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            ...this.auditActor(actor),
+            action: 'PAYROLL_RECALCULATED',
+            module: 'PAYROLL',
+            previousVal: JSON.stringify(this.pickFinancialFields(existingPayroll)),
+            newVal: JSON.stringify(this.pickFinancialFields(updatedPayroll)),
+          },
+        });
+
+        return updatedPayroll;
+      });
+    } catch (error: any) {
+      if (error?.code === 'P2025') {
+        throw new BadRequestException('Only draft payroll can be recalculated');
+      }
+      throw error;
+    }
+  }
+
+  private pickFinancialFields(payroll: any) {
+    return Object.fromEntries(
+      PAYROLL_FINANCIAL_FIELDS.map((field) => [field, payroll?.[field] ?? null]),
+    ) as Record<(typeof PAYROLL_FINANCIAL_FIELDS)[number], number | null>;
+  }
+
+  /* Read-only: runs the same calculation as recalculation and reports
+     what would change. Writes nothing. */
+  async previewRecalculation(payrollId: number) {
+    const normalizedPayrollId = this.normalizePositiveInteger(payrollId, 'payrollId');
+    const existingPayroll = await this.prisma.payroll.findUnique({
+      where: { id: normalizedPayrollId },
+      include: { others: true },
+    });
+
+    if (!existingPayroll) {
+      throw new BadRequestException('Payroll not found');
+    }
+
+    const calculation = await this.buildPayrollCalculation(
+      existingPayroll.employeeId,
+      existingPayroll.month,
+      existingPayroll.year,
+      existingPayroll,
+    );
+    const stored = this.pickFinancialFields(existingPayroll);
+    const recalculated = this.pickFinancialFields(calculation.data);
+    const differences = PAYROLL_FINANCIAL_FIELDS
+      .filter((field) => {
+        const before = stored[field];
+        const after = recalculated[field];
+        if (before === null || after === null) return before !== after;
+        return Math.abs(Number(before) - Number(after)) > 0.005;
+      })
+      .map((field) => ({
+        field,
+        stored: stored[field],
+        recalculated: recalculated[field],
+        delta:
+          stored[field] === null || recalculated[field] === null
+            ? null
+            : Number(recalculated[field]) - Number(stored[field]),
+      }));
+    return {
+      payrollId: existingPayroll.id,
+      employeeId: existingPayroll.employeeId,
+      month: existingPayroll.month,
+      year: existingPayroll.year,
+      status: existingPayroll.status,
+      needsRecalculation: existingPayroll.needsRecalculation ?? false,
+      revision: existingPayroll.revision ?? 0,
+      period: getPayrollPeriodDates(existingPayroll.month, existingPayroll.year),
+      stored,
+      recalculated,
+      differences,
+      splitMixedLeaveIds: calculation.splitMixedLeaveIds,
+      canRecalculate: existingPayroll.status === 'DRAFT',
+    };
+  }
+
+  /* Correction workflow: FINALIZED -> DRAFT so it can be recalculated */
+  async reopenPayroll(payrollId: number, reason: string, actor?: AuthorizationUser) {
+    this.ensurePayrollCorrectionRole(actor);
+    const normalizedPayrollId = this.normalizePositiveInteger(payrollId, 'payrollId');
+    const normalizedReason = String(reason ?? '').trim();
+    if (!normalizedReason) {
+      throw new BadRequestException('A reason is required to reopen payroll');
+    }
+
+    try {
+      return await this.prisma.$transaction(async (tx: any) => {
+        const payroll = await tx.payroll.findUnique({
+          where: { id: normalizedPayrollId },
+          include: { others: true },
+        });
+
+        if (!payroll) {
+          throw new BadRequestException('Payroll not found');
+        }
+        if (payroll.status === 'PAID') {
+          throw new BadRequestException('Paid payroll cannot be reopened');
+        }
+        if (payroll.status !== 'FINALIZED') {
+          throw new BadRequestException('Only finalized payroll can be reopened');
+        }
+
+        const reopenedPayroll = await tx.payroll.update({
+          where: { id: normalizedPayrollId, status: 'FINALIZED' },
+          data: { status: 'DRAFT', revision: { increment: 1 }, needsRecalculation: true },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            ...this.auditActor(actor),
+            action: 'PAYROLL_REOPENED',
+            module: 'PAYROLL',
+            previousVal: JSON.stringify(payroll),
+            newVal: JSON.stringify({
+              payrollId: normalizedPayrollId,
+              status: reopenedPayroll.status,
+              revision: reopenedPayroll.revision,
+              reason: normalizedReason,
+            }),
+          },
+        });
+
+        return reopenedPayroll;
+      });
+    } catch (error: any) {
+      if (error?.code === 'P2025') {
+        throw new BadRequestException('Only finalized payroll can be reopened');
+      }
+      throw error;
+    }
+  }
+
+  private async calculatePayrollData(
+    employeeId: number,
+    month: number,
+    year: number,
+    existingPayroll?: any,
+  ) {
+    return (await this.buildPayrollCalculation(employeeId, month, year, existingPayroll)).data;
+  }
+
+  /* The single payroll calculation path, used by run, recalculate and preview */
+  private async buildPayrollCalculation(
+    employeeId: number,
+    month: number,
+    year: number,
+    existingPayroll?: any,
+  ) {
+    const { startDate, endDateExclusive, endDate } = getPayrollPeriodRange(month, year);
 
     /* Salary - use whichever salary was effective as of this payroll month */
 
@@ -154,7 +384,9 @@ export class PayrollService {
 
     /* 🔥 Working Days */
 
-    const workingDays = await this.calculateWorkingDays(employeeId, startDate, endDate);
+    const workingDates = await this.getPeriodWorkingDates(employeeId, startDate, endDate);
+    const workingDays = workingDates.length;
+    const workingDateKeys = new Set(workingDates.map((date) => getBusinessDateKey(date)));
 
     /* 🔥 Canonical attendance history */
 
@@ -167,88 +399,120 @@ export class PayrollService {
       throw new BadRequestException('Employee not found');
     }
 
-    const attendanceHistoryResult = await this.attendanceService.getAttendanceHistory(
+    const attendanceHistory = await this.attendanceService.getAttendanceHistoryForDateRange(
       employee.userId,
-      month,
-      year,
+      employeeId,
+      startDate,
+      endDateExclusive,
     );
-    const attendanceHistory = Array.isArray(attendanceHistoryResult)
-      ? attendanceHistoryResult
-      : attendanceHistoryResult.data;
+    const leaveAllocation = await this.attendanceService.getLeaveDayAllocation(
+      employeeId,
+      startDate,
+      endDateExclusive,
+    );
 
-    let presentDays = 0;
+    /* 🔥 Day-level payable/LOP count. Each working day is worth at most
+       one payable day; approved leave only counts for the days inside
+       this period, and a half-day leave keeps the half day worked. */
 
-    for (const record of attendanceHistory) {
-      if (record.status === AttendanceStatus.PRESENT || record.status === AttendanceStatus.LATE) {
-        presentDays += 1;
-      } else if (record.status === AttendanceStatus.HALF_DAY) {
-        presentDays += 0.5;
+    const contributionByDate = new Map<string, number>();
+    let nonWorkingDayPresence = 0;
+
+    for (const record of attendanceHistory as any[]) {
+      const key = getBusinessDateKey(record.date);
+      if (workingDateKeys.has(key)) {
+        contributionByDate.set(key, attendanceContribution(record.status));
+      } else {
+        // Existing behavior: presence on a non-working day still counts
+        nonWorkingDayPresence += attendanceContribution(record.status);
       }
     }
 
-    const approvedLeaveDays = await this.prisma.leave.aggregate({
-      where: {
-        employeeId,
-        status: 'APPROVED',
-        startDate: { lte: endDate },
-        endDate: { gte: startDate },
-      },
-      _sum: { paidLeaveDays: true, lopDays: true },
-    });
+    let presentDays = 0;
+    let paidLeaveDays = 0;
+    let leaveLopDays = 0;
+    let absenceLopDays = 0;
 
-    const paidLeaveDays = Number(approvedLeaveDays._sum?.paidLeaveDays ?? 0);
-    const leaveLopDays = Number(approvedLeaveDays._sum?.lopDays ?? 0);
+    for (const key of workingDateKeys) {
+      const leave = leaveAllocation.byDate.get(key) ?? { paid: 0, lop: 0 };
+      const paid = Math.min(leave.paid, 1);
+      const leaveLop = Math.min(leave.lop, 1 - paid);
+      const dayPresent = Math.min(contributionByDate.get(key) ?? 0, 1 - paid - leaveLop);
+      const dayPayable = Math.min(1, dayPresent + paid);
+
+      presentDays += dayPresent;
+      paidLeaveDays += paid;
+      leaveLopDays += leaveLop;
+      absenceLopDays += Math.max(1 - dayPayable - leaveLop, 0);
+    }
 
     /* 🔥 FINAL LOGIC */
 
-    const payableDays = presentDays + paidLeaveDays;
-    const attendanceLopDays = Math.max(workingDays - payableDays - leaveLopDays, 0);
+    presentDays += nonWorkingDayPresence;
+    const attendanceLopDays = Math.max(absenceLopDays - nonWorkingDayPresence, 0);
     const lopDays = leaveLopDays + attendanceLopDays;
 
     /* 🔥 Calculation */
 
     const calc = PayrollCalculator.calculate(
-      salary.monthlyCTC,
+      salary.monthlyGross ?? salary.monthlyCTC,
       salary.structure,
       workingDays,
       lopDays,
     );
 
-    /* SAVE */
+    const adjustmentAllowance = (existingPayroll?.others ?? [])
+      .filter((adjustment: any) => adjustment.type === 'ALLOWANCE')
+      .reduce((sum: number, adjustment: any) => sum + Number(adjustment.amount ?? 0), 0);
+    const adjustmentDeduction = (existingPayroll?.others ?? [])
+      .filter((adjustment: any) => adjustment.type === 'DEDUCTION')
+      .reduce((sum: number, adjustment: any) => sum + Number(adjustment.amount ?? 0), 0);
+    const otherAllowance = Number(existingPayroll?.otherAllowance ?? adjustmentAllowance);
+    const otherDeduction = Number(existingPayroll?.otherDeduction ?? adjustmentDeduction);
+    const grossSalary = calc.gross + otherAllowance;
+    const deductions = calc.deductions + otherDeduction;
 
-    return this.prisma.payroll.create({
-      data: {
-        employeeId,
-        salaryId: salary.id,
+    const data = {
+      employeeId,
+      salaryId: salary.id,
 
-        month,
-        year,
+      month,
+      year,
 
-        workingDays,
-        presentDays,
-        lopDays,
-        paidLeaveDays,
+      workingDays,
+      presentDays,
+      lopDays,
+      paidLeaveDays,
 
-        basic: calc.basic,
-        hra: calc.hra,
-        conveyance: calc.conveyance,
-        specialAllowance: calc.specialAllowance,
-        otherAllowance: 0,
-        pf: calc.pf,
-        pt: calc.pt,
-        leaveDeduction: calc.leaveDeduction,
-        otherDeduction: 0,
+      basic: calc.basic,
+      hra: calc.hra,
+      conveyance: calc.conveyance,
+      specialAllowance: calc.specialAllowance,
+      otherAllowance,
+      pf: calc.pf,
+      pt: calc.pt,
+      leaveDeduction: calc.leaveDeduction,
+      otherDeduction,
 
-        grossSalary: calc.gross,
-        deductions: calc.deductions,
-        netSalary: calc.netSalary,
-      },
-    });
+      grossSalary,
+      deductions,
+      netSalary: grossSalary - deductions,
+    };
+
+    return {
+      data,
+      splitMixedLeaveIds: leaveAllocation.splitMixedLeaveIds,
+    };
   }
 
   /* HR UPDATE */
 
   async updatePayroll(payrollId: number, data: any) {
+    const payroll = await this.prisma.payroll.findUnique({ where: { id: payrollId } });
+    if (payroll?.status === 'FINALIZED' || payroll?.status === 'PAID') {
+      throw new BadRequestException('Payroll is finalized and cannot be modified');
+    }
+
     return this.prisma.payroll.update({
       where: { id: payrollId },
       data,
@@ -263,19 +527,34 @@ export class PayrollService {
 
   /* GET PAYROLL FOR EMPLOYEE */
 
-  async getPayroll(employeeId: number) {
-    if (!employeeId) {
+  async getPayroll(employeeId?: number, options: { finalizedOnly?: boolean } = {}) {
+    if (employeeId !== undefined && (!Number.isInteger(employeeId) || employeeId <= 0)) {
       throw new BadRequestException('Invalid employee ID');
     }
 
-    return this.prisma.payroll.findMany({
-      where: { employeeId },
-      include: { salary: true },
+    const where = {
+      ...(employeeId === undefined ? {} : { employeeId }),
+      ...(options.finalizedOnly ? { status: { in: EMPLOYEE_VISIBLE_PAYROLL_STATUSES } } : {}),
+    };
+    const payrolls = await this.prisma.payroll.findMany({
+      ...(Object.keys(where).length ? { where } : {}),
+      include: {
+        salary: true,
+        employee: {
+          select: { id: true, empCode: true, firstName: true, lastName: true },
+        },
+      },
       orderBy: [
         { year: 'desc' },
         { month: 'desc' },
       ],
     });
+
+    // Period dates from the authoritative 29th-28th rule, for display
+    return payrolls.map((payroll) => ({
+      ...payroll,
+      period: getPayrollPeriodDates(payroll.month, payroll.year),
+    }));
   }
 
   async getEmployeesWithoutSalary() {
@@ -308,8 +587,13 @@ export class PayrollService {
       throw new ForbiddenException('Access denied');
     }
 
+    // Employees never see DRAFT payroll figures, including their own
+    const isEmployee = String(user?.role ?? '').toUpperCase() === 'EMPLOYEE';
     const payrollRecords = await this.prisma.payroll.findMany({
-      where: { employeeId },
+      where: {
+        employeeId,
+        ...(isEmployee ? { status: { in: EMPLOYEE_VISIBLE_PAYROLL_STATUSES } } : {}),
+      },
       select: {
         month: true,
         year: true,
@@ -404,7 +688,7 @@ export class PayrollService {
     });
   }
 
-  async finalizePayroll(payrollId: number) {
+  async finalizePayroll(payrollId: number, actor?: AuthorizationUser) {
     const normalizedPayrollId = this.normalizePositiveInteger(payrollId, 'payrollId');
     const payroll = await this.prisma.payroll.findUnique({
       where: { id: normalizedPayrollId },
@@ -422,9 +706,44 @@ export class PayrollService {
       return payroll;
     }
 
-    return this.prisma.payroll.update({
-      where: { id: normalizedPayrollId },
-      data: { status: 'FINALIZED' },
-    });
+    if (payroll.needsRecalculation) {
+      throw new BadRequestException(
+        'Attendance or leave changed after this payroll was calculated. Recalculate it before finalizing.',
+      );
+    }
+
+    if (Number(payroll.netSalary) < 0) {
+      throw new BadRequestException('Payroll with a negative net salary cannot be finalized');
+    }
+
+    try {
+      return await this.prisma.$transaction(async (tx: any) => {
+        const finalizedPayroll = await tx.payroll.update({
+          where: { id: normalizedPayrollId, status: 'DRAFT', needsRecalculation: false },
+          data: { status: 'FINALIZED' },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            ...this.auditActor(actor),
+            action: 'PAYROLL_FINALIZED',
+            module: 'PAYROLL',
+            previousVal: null,
+            newVal: JSON.stringify({
+              payrollId: normalizedPayrollId,
+              revision: finalizedPayroll.revision ?? 0,
+              ...this.pickFinancialFields(finalizedPayroll),
+            }),
+          },
+        });
+
+        return finalizedPayroll;
+      });
+    } catch (error: any) {
+      if (error?.code === 'P2025') {
+        throw new BadRequestException('Payroll changed while finalizing. Reload and try again.');
+      }
+      throw error;
+    }
   }
 }

@@ -110,6 +110,8 @@ describe('Attendance regularization notification integration', () => {
         attendanceRecord: {
           update: attendanceRecordUpdate,
         },
+        employee: { findUnique: jest.fn().mockResolvedValue({ id: 90 }) },
+        payroll: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       })),
       attendanceRegularization: {
         findUnique: jest.fn().mockResolvedValue({
@@ -254,6 +256,8 @@ describe('Attendance regularization notification integration', () => {
         attendanceRecord: {
           update: attendanceUpdate,
         },
+        employee: { findUnique: jest.fn().mockResolvedValue({ id: 90 }) },
+        payroll: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       })),
       attendanceRegularization: {
         findUnique: jest.fn().mockResolvedValue({

@@ -1,6 +1,7 @@
 export class PayrollCalculator {
+  /* grossBasis = EmployeeSalary.monthlyGross, or monthlyCTC for legacy rows */
   static calculate(
-    ctc: number,
+    grossBasis: number,
     structure: any,
     workingDays: number,
     lopDays: number,
@@ -10,16 +11,19 @@ export class PayrollCalculator {
 
     /* EARNINGS */
 
-    const basic = (ctc * structure.basicPercent) / 100;
+    const basic = (grossBasis * structure.basicPercent) / 100;
 
     const hra = (basic * structure.hraPercent) / 100;
 
-    const conveyance = (ctc * structure.conveyancePercent) / 100;
+    // Fixed amount when configured; legacy structures keep the percentage
+    const conveyance = structure.conveyanceAmount !== null && structure.conveyanceAmount !== undefined
+      ? Number(structure.conveyanceAmount)
+      : (grossBasis * structure.conveyancePercent) / 100;
 
     const roundedBasic = round(basic);
     const roundedHra = round(hra);
     const roundedConveyance = round(conveyance);
-    const gross = round(ctc);
+    const gross = round(grossBasis);
     const specialAllowance = gross - roundedBasic - roundedHra - roundedConveyance;
 
 

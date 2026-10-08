@@ -51,6 +51,44 @@ export class PayrollController {
     return this.payrollService.runPayroll(dto);
   }
 
+  private parsePayrollId(id: unknown): number {
+    const payrollId = Number(id);
+    if (!Number.isInteger(payrollId) || payrollId <= 0) {
+      throw new BadRequestException('Invalid payroll id');
+    }
+    return payrollId;
+  }
+
+  @Post(':id/recalculate')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
+  recalculatePayroll(@Param('id') id: number, @Req() req?: Request) {
+    return this.payrollService.recalculatePayroll(this.parsePayrollId(id), req?.user as any);
+  }
+
+  /* Read-only: what recalculation would change, without writing */
+
+  @Get(':id/recalculate-preview')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
+  previewRecalculation(@Param('id') id: number) {
+    return this.payrollService.previewRecalculation(this.parsePayrollId(id));
+  }
+
+  /* Correction workflow: reopen a finalized payroll (reason required) */
+
+  @Post(':id/reopen')
+  @Roles('SUPER_ADMIN', 'CEO', 'HR')
+  reopenPayroll(
+    @Param('id') id: number,
+    @Body() body: { reason?: string },
+    @Req() req: Request,
+  ) {
+    return this.payrollService.reopenPayroll(
+      this.parsePayrollId(id),
+      String(body?.reason ?? ''),
+      req.user as any,
+    );
+  }
+
   /* Manual "Generate Payslip" action for org-wide finance/HR roles -
      runs payroll for the period if it hasn't been run yet, then
      returns the payslip PDF directly. */
@@ -103,15 +141,23 @@ export class PayrollController {
 
   @Post(':id/finalize')
   @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
-  finalizePayroll(@Param('id') id: number) {
-    return this.payrollService.finalizePayroll(Number(id));
+  finalizePayroll(@Param('id') id: number, @Req() req?: Request) {
+    return this.payrollService.finalizePayroll(Number(id), req?.user as any);
   }
 
   /* Get payroll for specific employee */
 
   @Get()
   @Roles('SUPER_ADMIN', 'CEO', 'HR', 'FINANCE_MANAGER')
-  getPayroll(@Query('employeeId') employeeId: number) {
+  getPayroll(@Query('employeeId') employeeId: string | undefined, @Req() req: Request) {
+    if (employeeId === undefined) {
+      const role = String((req.user as any)?.role ?? '').toUpperCase();
+      if (!['SUPER_ADMIN', 'CEO', 'HR'].includes(role)) {
+        throw new ForbiddenException('Access denied');
+      }
+      return this.payrollService.getPayroll();
+    }
+
     const parsedEmployeeId = Number(employeeId);
 
     if (!Number.isInteger(parsedEmployeeId) || parsedEmployeeId <= 0) {
@@ -135,9 +181,7 @@ export class PayrollController {
     @Res() res: Response,
     @Req() req: Request,
   ) {
-    if (!id) {
-      throw new BadRequestException('Invalid payroll id');
-    }
+    const payrollId = this.parsePayrollId(id);
 
     const user = this.requireAuthenticatedEmployee(req);
     const role = String(user.role).toUpperCase();
@@ -149,10 +193,10 @@ export class PayrollController {
     ].includes(role);
 
     if (isOrgWideRole) {
-      return this.payslipService.generatePayslip(Number(id), res);
+      return this.payslipService.generatePayslip(payrollId, res);
     }
 
-    const payroll = await this.payrollService.getPayrollById(Number(id));
+    const payroll = await this.payrollService.getPayrollById(payrollId);
     if (!payroll) {
       throw new BadRequestException('Payslip not found');
     }
@@ -166,7 +210,7 @@ export class PayrollController {
       throw new ForbiddenException('Access denied');
     }
 
-    return this.payslipService.generatePayslip(Number(id), res);
+    return this.payslipService.generatePayslip(payrollId, res);
   }
 
   /* Logged in employee payroll */
@@ -185,6 +229,9 @@ export class PayrollController {
       throw new ForbiddenException('Access denied');
     }
 
-    return this.payrollService.getPayroll(employeeId);
+    // Employees see only finalized/paid payroll; DRAFT figures are not final
+    return this.payrollService.getPayroll(employeeId, {
+      finalizedOnly: String(user.role).toUpperCase() === 'EMPLOYEE',
+    });
   }
 }

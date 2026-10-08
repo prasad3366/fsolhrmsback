@@ -512,6 +512,8 @@ model SalaryStructure {
   createdAt         DateTime         @default(now())
   conveyancePercent Float            @default(15)
   pfBase            Float            @default(0)
+  /// Fixed monthly conveyance; when null the legacy conveyancePercent applies
+  conveyanceAmount  Float?
   salaries          EmployeeSalary[]
 }
 
@@ -521,6 +523,8 @@ model EmployeeSalary {
   structureId   Int
   annualCTC     Float
   monthlyCTC    Float
+  /// Component basis; when null payroll uses monthlyCTC (legacy rows)
+  monthlyGross  Float?
   effectiveFrom DateTime
   employee      Employee        @relation(fields: [employeeId], references: [id])
   structure     SalaryStructure @relation(fields: [structureId], references: [id])
@@ -556,6 +560,10 @@ model Payroll {
   status           PayrollStatus       @default(DRAFT)
   createdAt        DateTime            @default(now())
   paidLeaveDays    Float?
+  /// Set when attendance/leave/holiday data changed after calculation; cleared by recalculation
+  needsRecalculation Boolean          @default(false)
+  /// Incremented each time a finalized payroll is reopened for correction
+  revision         Int                 @default(0)
   employee         Employee            @relation(fields: [employeeId], references: [id])
   salary           EmployeeSalary      @relation(fields: [salaryId], references: [id])
   others           PayrollAdjustment[]
