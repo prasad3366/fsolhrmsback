@@ -1431,7 +1431,8 @@ describe('AttendanceService shared working-day integration', () => {
     const prisma = {
       employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
       attendanceRecord: { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-      attendance: { findMany: jest.fn() },
+      // Legacy Attendance table: no legacy rows unless a test provides them
+      attendance: { findMany: jest.fn().mockResolvedValue([]) },
       leave: { findMany: jest.fn() },
     } as any;
     const service = new AttendanceService(
@@ -1943,6 +1944,67 @@ describe('AttendanceService WFH location working-day integration', () => {
 
     await expect(service.getAttendanceHistory(70)).resolves.toEqual([
       expect.objectContaining({ locationLabel }),
+    ]);
+  });
+});
+
+describe('AttendanceService history with legacy Attendance rows', () => {
+  // August 2026, working days 3-5 Aug; legacy table keyed by employeeId, new table by userId
+  const workingDates = [new Date(Date.UTC(2026, 7, 3, 12)), new Date(Date.UTC(2026, 7, 4, 12)), new Date(Date.UTC(2026, 7, 5, 12))];
+  const legacyRow = (day: number, status: AttendanceStatus) => ({
+    id: 900 + day,
+    employeeId: 7,
+    date: new Date(Date.UTC(2026, 7, day)),
+    punchIn: new Date(Date.UTC(2026, 7, day, 4)),
+    punchOut: new Date(Date.UTC(2026, 7, day, 12)),
+    totalHours: 8,
+    status,
+    locationStatus: null,
+    createdAt: new Date(Date.UTC(2026, 7, day)),
+    updatedAt: new Date(Date.UTC(2026, 7, day)),
+  });
+
+  const createService = (attendanceRecords: any[], legacyRecords: any[]) => {
+    const prisma = {
+      employee: { findUnique: jest.fn().mockResolvedValue({ id: 7, userId: 70 }) },
+      attendanceRecord: { findMany: jest.fn().mockResolvedValue(attendanceRecords) },
+      attendance: { findMany: jest.fn().mockResolvedValue(legacyRecords) },
+      leave: { findMany: jest.fn().mockResolvedValue([]) },
+    } as any;
+    const workingDaysService = { getWorkingDates: jest.fn().mockResolvedValue(workingDates) } as any;
+    return { service: new AttendanceService(prisma, {} as any, undefined as any, workingDaysService), prisma };
+  };
+
+  const byDay = (records: any[]) => Object.fromEntries(records.map((record) => [record.date.toISOString().slice(0, 10), record]));
+
+  it('shows legacy rows, lets new AttendanceRecord rows win on the same business day, and places new rows by check-in day', async () => {
+    const newRecords = [
+      // Same business day as a legacy row: the new record takes precedence
+      { id: 1, userId: 70, date: new Date(Date.UTC(2026, 7, 4)), clockIn: new Date(Date.UTC(2026, 7, 4, 4)), clockOut: new Date(Date.UTC(2026, 7, 4, 12)), totalHours: 8, status: AttendanceStatus.PRESENT },
+      // Stored date differs from its check-in day: it belongs to 5 Aug (check-in day)
+      { id: 2, userId: 70, date: new Date(Date.UTC(2026, 7, 2)), clockIn: new Date(Date.UTC(2026, 7, 5, 4)), clockOut: new Date(Date.UTC(2026, 7, 5, 12)), totalHours: 8, status: AttendanceStatus.PRESENT },
+    ];
+    const { service, prisma } = createService(newRecords, [legacyRow(3, AttendanceStatus.PRESENT), legacyRow(4, AttendanceStatus.ABSENT)]);
+
+    const records = await service.getAttendanceHistory(70, 8, 2026) as any[];
+    const days = byDay(records.map((record) => ({ ...record, date: record.clockIn ?? record.date })));
+
+    expect(prisma.attendance.findMany).toHaveBeenCalledWith({ where: { employeeId: 7 }, orderBy: { date: 'asc' } });
+    expect(records).toHaveLength(3); // no inferred absence: every working day has a record
+    expect(days['2026-08-03']).toEqual(expect.objectContaining({ id: 903, status: AttendanceStatus.PRESENT })); // legacy only
+    expect(days['2026-08-04']).toEqual(expect.objectContaining({ id: 1, status: AttendanceStatus.PRESENT })); // new wins over legacy ABSENT
+    expect(days['2026-08-05']).toEqual(expect.objectContaining({ id: 2, status: AttendanceStatus.PRESENT })); // check-in day
+  });
+
+  it('infers an absence only for working days with neither a legacy nor a new record', async () => {
+    const { service } = createService([], [legacyRow(3, AttendanceStatus.PRESENT)]);
+
+    const records = await service.getAttendanceHistory(70, 8, 2026) as any[];
+
+    expect(records.map((record) => [record.date.toISOString().slice(0, 10), record.status])).toEqual([
+      ['2026-08-03', AttendanceStatus.PRESENT],
+      ['2026-08-04', AttendanceStatus.ABSENT],
+      ['2026-08-05', AttendanceStatus.ABSENT],
     ]);
   });
 });
