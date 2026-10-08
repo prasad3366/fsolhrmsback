@@ -22,6 +22,7 @@ import {
 } from '../common/authorization/authorization.service';
 import { WorkingDaysService } from '../common/working-days/working-days.service';
 import {
+  getAttendanceRecordBusinessDateKey,
   getBusinessDateKey,
   getCurrentDayCutoff,
   getMonthRange,
@@ -443,11 +444,10 @@ export class AttendanceService {
       where: { userId },
     })).map((record) => this.withLocationLabel(this.effectiveRecord(record)));
     const monthRecords = records.filter((record) =>
-      monthDateKeys.has(getBusinessDateKey(record.clockIn ?? record.date)),
+      monthDateKeys.has(getAttendanceRecordBusinessDateKey(record)),
     );
 
-    const recordBusinessDateKey = (record: { date: Date; clockIn?: Date | null }) =>
-      getBusinessDateKey(record.clockIn ?? record.date);
+    const recordBusinessDateKey = getAttendanceRecordBusinessDateKey;
     const attendanceByDate = new Map(monthRecords.map((record) => [recordBusinessDateKey(record), record]));
     const statusByDate = await this.buildLeaveAwareStatusMap(employee.id, monthDates, attendanceByDate);
     const workingDates = await this.workingDaysService.getWorkingDates(employee.id, monthDates);
@@ -507,21 +507,36 @@ export class AttendanceService {
       dates.push(new Date(date));
     }
 
+    // Records belong to their check-in business day (same rule as the attendance
+    // screen), so also fetch rows whose stored date differs from that day.
+    const oneDay = 24 * 60 * 60 * 1000;
+    const periodKeys = new Set(dates.map((date) => getBusinessDateKey(date)));
     const records = await this.prisma.attendanceRecord.findMany({
-      where: { userId, date: { gte: startDate, lt: endDateExclusive } },
-      orderBy: { date: 'asc' },
+      where: {
+        userId,
+        OR: [
+          { date: { gte: startDate, lt: endDateExclusive } },
+          { clockIn: { gte: new Date(startDate.getTime() - oneDay), lt: new Date(endDateExclusive.getTime() + oneDay) } },
+        ],
+      },
+      orderBy: [{ date: 'asc' }, { id: 'asc' }],
     });
-    const effectiveRecords = records
-      .map((record) => this.withLocationLabel(this.effectiveRecord(record)));
-    const attendanceByDate = new Map(
-      effectiveRecords.map((record) => [getBusinessDateKey(record.date), record]),
-    );
+    // One record per business day; the most recently created record wins
+    const attendanceByDate = new Map<string, any>();
+    for (const record of [...records].sort((left, right) => left.id - right.id)) {
+      const key = getAttendanceRecordBusinessDateKey(record);
+      if (periodKeys.has(key)) {
+        attendanceByDate.set(key, this.withLocationLabel(this.effectiveRecord(record)));
+      }
+    }
     const statusByDate = await this.buildLeaveAwareStatusMap(employeeId, dates, attendanceByDate);
 
-    return effectiveRecords.map((record) => ({
-      ...record,
-      status: statusByDate.get(getBusinessDateKey(record.date)) ?? record.status,
-    }));
+    return [...attendanceByDate.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, record]) => ({
+        ...record,
+        status: statusByDate.get(key) ?? record.status,
+      }));
   }
 
   async canAccessEmployeeAttendance(user: any, employeeId: number) {

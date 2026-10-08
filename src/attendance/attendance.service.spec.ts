@@ -832,12 +832,16 @@ describe('AttendanceService payroll date-range history', () => {
         expect.objectContaining({ id: 1, status: AttendanceStatus.PRESENT }),
       ]);
 
+      // Rows are selected by stored date OR check-in time, then placed on their check-in day
       expect(prisma.attendanceRecord.findMany).toHaveBeenCalledWith({
         where: {
           userId: 70,
-          date: { gte: date, lt: new Date('2026-09-09T00:00:00.000Z') },
+          OR: [
+            { date: { gte: date, lt: new Date('2026-09-09T00:00:00.000Z') } },
+            { clockIn: { gte: new Date('2026-09-07T00:00:00.000Z'), lt: new Date('2026-09-10T00:00:00.000Z') } },
+          ],
         },
-        orderBy: { date: 'asc' },
+        orderBy: [{ date: 'asc' }, { id: 'asc' }],
       });
     },
   );
