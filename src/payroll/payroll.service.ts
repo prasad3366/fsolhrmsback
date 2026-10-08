@@ -706,6 +706,14 @@ export class PayrollService {
       return payroll;
     }
 
+    // Attendance keeps arriving until the period ends; finalizing earlier would freeze incomplete figures
+    const { endDate: periodEndDate } = getPayrollPeriodDates(payroll.month, payroll.year);
+    if (getBusinessDateKey(new Date()) <= periodEndDate) {
+      throw new BadRequestException(
+        `Payroll for ${payroll.month}/${payroll.year} cannot be finalized before its payroll period ends on ${periodEndDate}. Recalculate and finalize it after the period ends.`,
+      );
+    }
+
     if (payroll.needsRecalculation) {
       throw new BadRequestException(
         'Attendance or leave changed after this payroll was calculated. Recalculate it before finalizing.',

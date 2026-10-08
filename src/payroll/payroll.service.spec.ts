@@ -437,7 +437,7 @@ describe('PayrollService.addOther', () => {
   });
 
   it('finalizes a draft payroll explicitly', async () => {
-    prisma.payroll.findUnique.mockResolvedValue({ id: 1, status: 'DRAFT' });
+    prisma.payroll.findUnique.mockResolvedValue({ id: 1, status: 'DRAFT', month: 9, year: 2026 });
     prisma.payroll.update.mockResolvedValue({ id: 1, status: 'FINALIZED' });
 
     await expect(service.finalizePayroll(1)).resolves.toEqual({ id: 1, status: 'FINALIZED' });
@@ -491,5 +491,97 @@ describe('PayrollService.addOther', () => {
     await expect(
       service.runPayroll({ employeeId: 1, month: 2, year: Number.POSITIVE_INFINITY } as any),
     ).rejects.toThrow(BadRequestException);
+  });
+});
+
+describe('PayrollService.finalizePayroll period-end rule', () => {
+  // September 2026 payroll period: 29 Aug 2026 - 28 Sep 2026 (Asia/Kolkata business dates)
+  const draft = { id: 1, status: 'DRAFT', month: 9, year: 2026, needsRecalculation: false, netSalary: 50000 };
+  let prisma: any;
+  let service: PayrollService;
+
+  const at = (instant: string) => jest.useFakeTimers().setSystemTime(new Date(instant));
+
+  beforeEach(() => {
+    prisma = {
+      payroll: {
+        findUnique: jest.fn().mockResolvedValue(draft),
+        update: jest.fn().mockResolvedValue({ ...draft, status: 'FINALIZED' }),
+      },
+      auditLog: { create: jest.fn() },
+      $transaction: jest.fn(async (callback: any) => callback(prisma)),
+    };
+    service = new PayrollService(prisma, {} as any, {} as any, { getWorkingDates: jest.fn() } as any);
+  });
+
+  afterEach(() => jest.useRealTimers());
+
+  it.each([
+    ['in the middle of the period (16 Sep)', '2026-09-16T04:30:00.000Z'],
+    ['on the last day of the period (28 Sep, IST)', '2026-09-28T12:00:00.000Z'],
+    ['late on 28 Sep IST (still the last day)', '2026-09-28T18:00:00.000Z'],
+  ])('rejects finalization %s', async (_label, instant) => {
+    at(instant);
+
+    await expect(service.finalizePayroll(1)).rejects.toThrow(
+      'Payroll for 9/2026 cannot be finalized before its payroll period ends on 2026-09-28',
+    );
+    expect(prisma.payroll.update).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['just after the period ends (00:30 IST on 29 Sep)', '2026-09-28T19:00:00.000Z'],
+    ['well after the period ends (8 Oct)', '2026-10-08T05:00:00.000Z'],
+  ])('allows finalization %s', async (_label, instant) => {
+    at(instant);
+
+    await expect(service.finalizePayroll(1)).resolves.toEqual(expect.objectContaining({ status: 'FINALIZED' }));
+    expect(prisma.payroll.update).toHaveBeenCalledWith({
+      where: { id: 1, status: 'DRAFT', needsRecalculation: false },
+      data: { status: 'FINALIZED' },
+    });
+  });
+
+  it('keeps the stale-payroll protection after the period ends', async () => {
+    at('2026-10-08T05:00:00.000Z');
+    prisma.payroll.findUnique.mockResolvedValue({ ...draft, needsRecalculation: true });
+
+    await expect(service.finalizePayroll(1)).rejects.toThrow('Recalculate it before finalizing');
+    expect(prisma.payroll.update).not.toHaveBeenCalled();
+  });
+
+  it('keeps the negative-net protection after the period ends', async () => {
+    at('2026-10-08T05:00:00.000Z');
+    prisma.payroll.findUnique.mockResolvedValue({ ...draft, netSalary: -100 });
+
+    await expect(service.finalizePayroll(1)).rejects.toThrow('negative net salary');
+    expect(prisma.payroll.update).not.toHaveBeenCalled();
+  });
+
+  it('keeps the PAID protection unchanged (checked before the period rule)', async () => {
+    at('2026-09-16T04:30:00.000Z');
+    prisma.payroll.findUnique.mockResolvedValue({ ...draft, status: 'PAID' });
+
+    await expect(service.finalizePayroll(1)).rejects.toThrow('Paid payroll cannot be finalized');
+  });
+
+  it('keeps returning an already FINALIZED payroll unchanged, even before the period ends', async () => {
+    at('2026-09-16T04:30:00.000Z');
+    const finalized = { ...draft, status: 'FINALIZED' };
+    prisma.payroll.findUnique.mockResolvedValue(finalized);
+
+    await expect(service.finalizePayroll(1)).resolves.toBe(finalized);
+    expect(prisma.payroll.update).not.toHaveBeenCalled();
+  });
+
+  it('applies the same rule to January (period 29 Dec - 28 Jan)', async () => {
+    prisma.payroll.findUnique.mockResolvedValue({ ...draft, month: 1, year: 2027 });
+
+    at('2027-01-28T10:00:00.000Z');
+    await expect(service.finalizePayroll(1)).rejects.toThrow('period ends on 2027-01-28');
+
+    at('2027-01-29T10:00:00.000Z');
+    await expect(service.finalizePayroll(1)).resolves.toEqual(expect.objectContaining({ status: 'FINALIZED' }));
   });
 });
