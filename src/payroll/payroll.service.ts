@@ -17,7 +17,7 @@ import {
   AuthorizationService,
   AuthorizationUser,
 } from '../common/authorization/authorization.service';
-import { getBusinessDateKey } from '../attendance/utils/business-date.util';
+import { getAttendanceRecordBusinessDateKey, getBusinessDateKey } from '../attendance/utils/business-date.util';
 import {
   EMPLOYEE_VISIBLE_PAYROLL_STATUSES,
   getPayrollPeriodDates,
@@ -419,7 +419,7 @@ export class PayrollService {
     let nonWorkingDayPresence = 0;
 
     for (const record of attendanceHistory as any[]) {
-      const key = getBusinessDateKey(record.date);
+      const key = getAttendanceRecordBusinessDateKey(record);
       if (workingDateKeys.has(key)) {
         contributionByDate.set(key, attendanceContribution(record.status));
       } else {

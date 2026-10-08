@@ -34,6 +34,13 @@ export function getBusinessDateKey(value: Date): string {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+/* The business day an attendance record belongs to: its check-in day, falling
+   back to the stored date. Shared by the attendance screen and payroll so both
+   always place a record on the same day. */
+export function getAttendanceRecordBusinessDateKey(record: { date: Date; clockIn?: Date | null }): string {
+  return getBusinessDateKey(record.clockIn ?? record.date);
+}
+
 export function getMonthRange(year: number, month: number) {
   return {
     start: new Date(Date.UTC(year, month - 1, 1)),

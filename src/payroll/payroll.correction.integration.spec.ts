@@ -547,6 +547,76 @@ describe('Check-in without check-out (integration)', () => {
   });
 });
 
+describe('Payroll uses the check-in business day, like the attendance screen (integration)', () => {
+  // Production case (Payroll 23): attendance on these 19 days, 14 Sep is a holiday -> 20 working days
+  const ATTENDED = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-07', '2026-09-08', '2026-09-09', '2026-09-10', '2026-09-11',
+    '2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18', '2026-09-21', '2026-09-22', '2026-09-23', '2026-09-24', '2026-09-25', '2026-09-28'];
+
+  let nextId = 5000;
+  const addRow = (ctx: ReturnType<typeof setup>, checkInDay: string, storedDate: string, hours = 9) => {
+    const { clockIn, clockOut, totalHours } = punch(checkInDay, hours);
+    ctx.prisma.tables.attendanceRecord.push({
+      id: nextId++, userId: USER_ID, userEmail: 'asha@example.com', date: businessDate(storedDate), status: 'PRESENT', clockIn, clockOut, totalHours,
+    });
+  };
+  const runSeptember = (ctx: ReturnType<typeof setup>) => ctx.payrollService.runPayroll({ employeeId: EMPLOYEE_ID, month: 9, year: 2026 } as any);
+  const productionLikeSetup = () => {
+    const ctx = setup();
+    Object.assign(ctx.prisma.tables.employeeSalary[0], { monthlyCTC: 33333, annualCTC: 399996 });
+    ctx.prisma.tables.holiday.push({ id: 1, date: businessDate('2026-09-14'), name: 'Holiday', isOptional: false });
+    return ctx;
+  };
+
+  it('counts records whose stored date differs from their check-in day (production Payroll 23 case)', async () => {
+    const ctx = productionLikeSetup();
+    // 6 of the 19 rows have a stored date outside the payroll period, check-in inside it
+    const misdated = new Set(['2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18', '2026-09-22', '2026-09-23']);
+    for (const day of ATTENDED) addRow(ctx, day, misdated.has(day) ? day.replace('2026-09', '2026-07') : day);
+
+    // Before the fix payroll selected by the stored date only: present 13, LOP 7, LOP deduction 11667
+    await expect(runSeptember(ctx)).resolves.toEqual(expect.objectContaining({
+      workingDays: 20, presentDays: 19, lopDays: 1, leaveDeduction: 1667,
+    }));
+  });
+
+  it('a record whose stored date lands on an approved leave day is counted on its real check-in day', async () => {
+    const ctx = productionLikeSetup();
+    for (const day of ATTENDED.filter((day) => day !== '2026-09-22' && day !== '2026-09-21')) addRow(ctx, day, day);
+    addRow(ctx, '2026-09-22', '2026-09-21'); // worked on 22 Sep, stored as 21 Sep
+    ctx.addLeave({ startDate: '2026-09-21', endDate: '2026-09-21', totalDays: 1, paidLeaveDays: 1, lopDays: 0 });
+
+    await expect(runSeptember(ctx)).resolves.toEqual(expect.objectContaining({ presentDays: 18, paidLeaveDays: 1, lopDays: 1 }));
+  });
+
+  it('two records for the same check-in day count once, and the most recent record wins', async () => {
+    const ctx = productionLikeSetup();
+    for (const day of ATTENDED.filter((day) => day !== '2026-09-15')) addRow(ctx, day, day);
+    addRow(ctx, '2026-09-15', '2026-09-13', 2); // older legacy row: stored date shifted, 2 hours (ABSENT)
+    addRow(ctx, '2026-09-15', '2026-09-15', 9); // later Add Attendance row for the same day (PRESENT)
+    addRow(ctx, '2026-09-12', '2026-09-12', 9); // Saturday work, duplicated below
+    addRow(ctx, '2026-09-12', '2026-09-11', 9); // must not be counted twice as non-working presence
+
+    await expect(runSeptember(ctx)).resolves.toEqual(expect.objectContaining({ presentDays: 20, lopDays: 0 }));
+  });
+
+  it('a check-in after the period ends belongs to the next payroll period even if its stored date is inside', async () => {
+    const ctx = productionLikeSetup();
+    for (const day of ATTENDED) addRow(ctx, day, day);
+    addRow(ctx, '2026-09-29', '2026-09-26'); // worked 29 Sep (October period), stored as 26 Sep
+
+    await expect(runSeptember(ctx)).resolves.toEqual(expect.objectContaining({ presentDays: 19, lopDays: 1 }));
+  });
+
+  it('correctly stored records give exactly the previous result', async () => {
+    const ctx = productionLikeSetup();
+    for (const day of ATTENDED) addRow(ctx, day, day);
+
+    await expect(runSeptember(ctx)).resolves.toEqual(expect.objectContaining({
+      workingDays: 20, presentDays: 19, lopDays: 1, leaveDeduction: 1667,
+    }));
+  });
+});
+
 describe('Gross-based salary structure (integration)', () => {
   const standardGrossStructure = { basicPercent: 35, hraPercent: 40, conveyancePercent: 0, conveyanceAmount: 2000, pfPercent: 12, ptAmount: 200 };
 
