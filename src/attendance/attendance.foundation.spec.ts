@@ -93,10 +93,16 @@ describe('Attendance foundation', () => {
     jest.useFakeTimers().setSystemTime(new Date(2026, 8, 11, 12));
     try {
       await service.getAttendanceHistory(70, 1, 2026);
+      // Same windowed query as payroll: stored date in the month or check-in within a day of it
       expect(attendanceFindMany).toHaveBeenCalledWith({
         where: {
           userId: 70,
+          OR: [
+            { date: { gte: new Date('2026-01-01T00:00:00.000Z'), lt: new Date('2026-02-01T00:00:00.000Z') } },
+            { clockIn: { gte: new Date('2025-12-31T00:00:00.000Z'), lt: new Date('2026-02-02T00:00:00.000Z') } },
+          ],
         },
+        orderBy: [{ date: 'asc' }, { id: 'asc' }],
       });
     } finally {
       jest.useRealTimers();

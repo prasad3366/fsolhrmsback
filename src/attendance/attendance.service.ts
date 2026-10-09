@@ -454,88 +454,15 @@ export class AttendanceService {
       return paginate(filteredRecords, month, year);
     }
 
-    /*
-     * New attendance table.
-     */
-    const newRecords = (
-      await this.prisma.attendanceRecord.findMany({
-        where: { userId },
-      })
-    )
-      .map((record) => this.withLocationLabel(this.effectiveRecord(record)))
-      .filter((record) =>
-        monthDateKeys.has(getAttendanceRecordBusinessDateKey(record)),
-      );
-
-    /*
-     * Legacy attendance table.
-     *
-     * The old table is keyed by employeeId instead of userId.
-     * Convert the legacy record into the same shape used by the
-     * attendance history response.
-     */
-    // Same optional-delegate pattern as the employee lookup above
-    const legacyRecords = this.prisma.attendance?.findMany
-      ? await this.prisma.attendance.findMany({
-          where: {
-            employeeId: employee.id,
-          },
-          orderBy: { date: 'asc' },
-        })
-      : [];
-
-    const mappedLegacyRecords = legacyRecords
-      .map((record) => ({
-        id: record.id,
-        userId,
-        userEmail: '',
-        date: toBusinessDate(record.date),
-        clockIn: record.punchIn,
-        clockOut: record.punchOut,
-        totalHours: record.totalHours,
-        isLate: false,
-        isEarlyCheckout: false,
-        ipAddress: null,
-        punchInLocationStatus: record.locationStatus,
-        punchOutLocationStatus: record.locationStatus,
-        notes: null,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
-        status: record.status,
-        locationLabel: this.locationLabel(
-          record.locationStatus,
-          record.locationStatus,
-        ),
-      }))
-      // Same business-day rule as new records: check-in day, falling back to date
-      .filter((record) => monthDateKeys.has(getAttendanceRecordBusinessDateKey(record)));
-
-    /*
-     * Merge by business date.
-     *
-     * New attendance_records take precedence over legacy Attendance
-     * when both contain the same attendance date.
-     */
-    const recordBusinessDateKey = getAttendanceRecordBusinessDateKey;
-
-    const recordsByDate = new Map<string, any>();
-
-    for (const record of mappedLegacyRecords) {
-      recordsByDate.set(recordBusinessDateKey(record), record);
-    }
-
-    for (const record of newRecords) {
-      recordsByDate.set(recordBusinessDateKey(record), record);
-    }
-
-    const monthRecords = Array.from(recordsByDate.values());
-
-    const attendanceByDate = new Map(
-      monthRecords.map((record) => [
-        recordBusinessDateKey(record),
-        record,
-      ]),
+    // Same attendance interpretation as payroll (getAttendanceHistoryForDateRange)
+    const attendanceByDate = await this.loadAttendanceByBusinessDate(
+      userId,
+      employee.id,
+      monthStart,
+      new Date(Date.UTC(year, month - 1, endDay + 1)),
     );
+    const monthRecords = Array.from(attendanceByDate.values());
+    const recordBusinessDateKey = getAttendanceRecordBusinessDateKey;
 
     const statusByDate = await this.buildLeaveAwareStatusMap(
       employee.id,
@@ -630,28 +557,8 @@ export class AttendanceService {
       dates.push(new Date(date));
     }
 
-    // Records belong to their check-in business day (same rule as the attendance
-    // screen), so also fetch rows whose stored date differs from that day.
-    const oneDay = 24 * 60 * 60 * 1000;
-    const periodKeys = new Set(dates.map((date) => getBusinessDateKey(date)));
-    const records = await this.prisma.attendanceRecord.findMany({
-      where: {
-        userId,
-        OR: [
-          { date: { gte: startDate, lt: endDateExclusive } },
-          { clockIn: { gte: new Date(startDate.getTime() - oneDay), lt: new Date(endDateExclusive.getTime() + oneDay) } },
-        ],
-      },
-      orderBy: [{ date: 'asc' }, { id: 'asc' }],
-    });
-    // One record per business day; the most recently created record wins
-    const attendanceByDate = new Map<string, any>();
-    for (const record of [...records].sort((left, right) => left.id - right.id)) {
-      const key = getAttendanceRecordBusinessDateKey(record);
-      if (periodKeys.has(key)) {
-        attendanceByDate.set(key, this.withLocationLabel(this.effectiveRecord(record)));
-      }
-    }
+    // Same attendance interpretation as the attendance screen (getAttendanceHistory)
+    const attendanceByDate = await this.loadAttendanceByBusinessDate(userId, employeeId, startDate, endDateExclusive);
     const statusByDate = await this.buildLeaveAwareStatusMap(employeeId, dates, attendanceByDate);
 
     return [...attendanceByDate.entries()]
@@ -660,6 +567,89 @@ export class AttendanceService {
         ...record,
         status: statusByDate.get(key) ?? record.status,
       }));
+  }
+
+  /* The one attendance interpretation shared by the attendance screen and
+     payroll: one effective record per business day of [startDate, endDateExclusive).
+     Records belong to their check-in business day. Legacy Attendance rows hold
+     punches recorded before AttendanceRecord existed and only fill days with no
+     AttendanceRecord; among several AttendanceRecords for a day the highest id wins. */
+  private async loadAttendanceByBusinessDate(
+    userId: number,
+    employeeId: number,
+    startDate: Date,
+    endDateExclusive: Date,
+  ) {
+    const oneDay = 24 * 60 * 60 * 1000;
+    const dateKeys = new Set<string>();
+    for (const date = new Date(startDate); date < endDateExclusive; date.setUTCDate(date.getUTCDate() + 1)) {
+      dateKeys.add(getBusinessDateKey(date));
+    }
+    const slackStart = new Date(startDate.getTime() - oneDay);
+    const slackEnd = new Date(endDateExclusive.getTime() + oneDay);
+
+    // Also fetch rows whose stored date differs from their check-in day
+    const records = await this.prisma.attendanceRecord.findMany({
+      where: {
+        userId,
+        OR: [
+          { date: { gte: startDate, lt: endDateExclusive } },
+          { clockIn: { gte: slackStart, lt: slackEnd } },
+        ],
+      },
+      orderBy: [{ date: 'asc' }, { id: 'asc' }],
+    });
+
+    // The legacy table is keyed by employeeId and its date is a full timestamp
+    const legacyRecords = this.prisma.attendance?.findMany
+      ? await this.prisma.attendance.findMany({
+          where: {
+            employeeId,
+            OR: [
+              { date: { gte: slackStart, lt: slackEnd } },
+              { punchIn: { gte: slackStart, lt: slackEnd } },
+            ],
+          },
+          orderBy: { id: 'asc' },
+        })
+      : [];
+
+    const byId = (left: { id?: number }, right: { id?: number }) => (left.id ?? 0) - (right.id ?? 0);
+    const attendanceByDate = new Map<string, any>();
+    const place = (record: any) => {
+      const key = getAttendanceRecordBusinessDateKey(record);
+      if (dateKeys.has(key)) {
+        attendanceByDate.set(key, this.withLocationLabel(this.effectiveRecord(record)));
+      }
+    };
+
+    // Legacy first so any AttendanceRecord for the same day overrides it
+    [...legacyRecords].sort(byId).forEach((record) => place(this.fromLegacyAttendance(record, userId)));
+    [...records].sort(byId).forEach(place);
+
+    return attendanceByDate;
+  }
+
+  /* Legacy Attendance row in the AttendanceRecord shape */
+  private fromLegacyAttendance(record: any, userId: number) {
+    return {
+      id: record.id,
+      userId,
+      userEmail: '',
+      date: toBusinessDate(record.date),
+      clockIn: record.punchIn,
+      clockOut: record.punchOut,
+      totalHours: record.totalHours,
+      isLate: false,
+      isEarlyCheckout: false,
+      ipAddress: null,
+      punchInLocationStatus: record.locationStatus,
+      punchOutLocationStatus: record.locationStatus,
+      notes: null,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      status: record.status,
+    };
   }
 
   async canAccessEmployeeAttendance(user: any, employeeId: number) {

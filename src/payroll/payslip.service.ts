@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { PrismaService } from '../prisma/prisma.service';
 import { Response } from 'express';
 import * as puppeteer from 'puppeteer';
-import { getPayrollPeriodRange } from './payroll-period.util';
+import { getPayrollPeriodRange, LEGACY_ROUNDING_TOLERANCE } from './payroll-period.util';
 import {
   PAYSLIP_COMPANY_NAME,
   PAYSLIP_LOGO_DATA_URI,
@@ -78,10 +78,21 @@ export class PayslipService {
 
     /* Adjustments are listed individually; any stored amount they do not
        explain (legacy rows) stays as a single "Other" line */
-    const adjustmentRows = (type: 'ALLOWANCE' | 'DEDUCTION', storedTotal: number, otherLabel: string) => {
+    const adjustmentRows = (
+      type: 'ALLOWANCE' | 'DEDUCTION',
+      storedTotal: number,
+      otherLabel: string,
+      overCountTolerance = TOTALS_TOLERANCE,
+    ) => {
       const adjustments = (payroll.others ?? []).filter((adjustment) => adjustment.type === type);
       const rows = adjustments.map((adjustment) => ({ label: adjustment.name, amount: Number(adjustment.amount) }));
       const remainder = Number(storedTotal) - rows.reduce((sum, row) => sum + row.amount, 0);
+      // Recorded adjustments the payroll never applied would print as a negative line
+      if (remainder < -overCountTolerance) {
+        throw new ConflictException(
+          `Recorded ${type.toLowerCase()} adjustments exceed the amount stored on this payroll by ${formatMoney(-remainder)}. Reconcile the payroll before issuing a payslip.`,
+        );
+      }
       if (!rows.length || Math.abs(remainder) > TOTALS_TOLERANCE) {
         rows.push({ label: otherLabel, amount: rows.length ? remainder : Number(storedTotal) });
       }
@@ -98,7 +109,13 @@ export class PayslipService {
       { label: 'Provident fund', amount: payroll.pf },
       { label: 'Professional tax', amount: payroll.pt },
       { label: 'Leave / LOP deduction', amount: payroll.leaveDeduction },
-      ...adjustmentRows('DEDUCTION', otherDeduction, 'Other deductions'),
+      // A legacy total derived from the stored residual carries the old calculation's rounding
+      ...adjustmentRows(
+        'DEDUCTION',
+        otherDeduction,
+        'Other deductions',
+        payroll.otherDeduction === null || payroll.otherDeduction === undefined ? LEGACY_ROUNDING_TOLERANCE : TOTALS_TOLERANCE,
+      ),
     ];
     const breakdownRows = Array.from(
       { length: Math.max(earningRows.length, deductionRows.length) },

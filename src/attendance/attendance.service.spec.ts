@@ -1989,7 +1989,11 @@ describe('AttendanceService history with legacy Attendance rows', () => {
     const records = await service.getAttendanceHistory(70, 8, 2026) as any[];
     const days = byDay(records.map((record) => ({ ...record, date: record.clockIn ?? record.date })));
 
-    expect(prisma.attendance.findMany).toHaveBeenCalledWith({ where: { employeeId: 7 }, orderBy: { date: 'asc' } });
+    const slack = { gte: new Date('2026-07-31T00:00:00.000Z'), lt: new Date('2026-09-02T00:00:00.000Z') };
+    expect(prisma.attendance.findMany).toHaveBeenCalledWith({
+      where: { employeeId: 7, OR: [{ date: slack }, { punchIn: slack }] },
+      orderBy: { id: 'asc' },
+    });
     expect(records).toHaveLength(3); // no inferred absence: every working day has a record
     expect(days['2026-08-03']).toEqual(expect.objectContaining({ id: 903, status: AttendanceStatus.PRESENT })); // legacy only
     expect(days['2026-08-04']).toEqual(expect.objectContaining({ id: 1, status: AttendanceStatus.PRESENT })); // new wins over legacy ABSENT

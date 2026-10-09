@@ -26,6 +26,11 @@ export function getPayrollPeriodDates(month: number, year: number) {
   };
 }
 
+/* Payrolls created before the component columns were populated round their
+   stored totals and components separately, so a total can differ from the sum
+   of its components by this much without any adjustment behind it */
+export const LEGACY_ROUNDING_TOLERANCE = 2;
+
 /* Payroll statuses an EMPLOYEE may see; DRAFT figures are not final */
 export const EMPLOYEE_VISIBLE_PAYROLL_STATUSES: PayrollStatus[] = ['FINALIZED', 'PAID'];
 

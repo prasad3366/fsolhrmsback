@@ -22,6 +22,7 @@ import {
   EMPLOYEE_VISIBLE_PAYROLL_STATUSES,
   getPayrollPeriodDates,
   getPayrollPeriodRange,
+  LEGACY_ROUNDING_TOLERANCE,
 } from './payroll-period.util';
 
 const PAYROLL_CORRECTION_ROLES = ['SUPER_ADMIN', 'CEO', 'HR'];
@@ -46,6 +47,13 @@ const PAYROLL_FINANCIAL_FIELDS = [
   'deductions',
   'netSalary',
 ] as const;
+
+type HistoricalAdjustmentIssue = {
+  code: string;
+  blocking: boolean;
+  message: string;
+  amount: number;
+};
 
 const attendanceContribution = (status: AttendanceStatus | string | undefined) => {
   if (status === AttendanceStatus.PRESENT || status === AttendanceStatus.LATE) return 1;
@@ -202,12 +210,14 @@ export class PayrollService {
       throw new BadRequestException('Only draft payroll can be recalculated');
     }
 
-    const data = await this.calculatePayrollData(
+    const calculation = await this.buildPayrollCalculation(
       existingPayroll.employeeId,
       existingPayroll.month,
       existingPayroll.year,
       existingPayroll,
     );
+    this.assertNoBlockingAdjustmentIssues(calculation.historicalAdjustments.issues);
+    const { data } = calculation;
 
     try {
       return await this.prisma.$transaction(async (tx: any) => {
@@ -292,6 +302,16 @@ export class PayrollService {
       recalculated,
       differences,
       splitMixedLeaveIds: calculation.splitMixedLeaveIds,
+      // Amounts carried from earlier adjustments, and anything blocking recalculation
+      historicalAdjustments: {
+        legacyRecord: calculation.historicalAdjustments.legacyRecord,
+        recordedAllowance: calculation.historicalAdjustments.recordedAllowance,
+        recordedDeduction: calculation.historicalAdjustments.recordedDeduction,
+        carriedOtherAllowance: calculation.historicalAdjustments.otherAllowance,
+        carriedOtherDeduction: calculation.historicalAdjustments.otherDeduction,
+        issues: calculation.historicalAdjustments.issues,
+        blocksRecalculation: calculation.historicalAdjustments.issues.some((issue) => issue.blocking),
+      },
       canRecalculate: existingPayroll.status === 'DRAFT',
     };
   }
@@ -461,14 +481,8 @@ export class PayrollService {
       lopDays,
     );
 
-    const adjustmentAllowance = (existingPayroll?.others ?? [])
-      .filter((adjustment: any) => adjustment.type === 'ALLOWANCE')
-      .reduce((sum: number, adjustment: any) => sum + Number(adjustment.amount ?? 0), 0);
-    const adjustmentDeduction = (existingPayroll?.others ?? [])
-      .filter((adjustment: any) => adjustment.type === 'DEDUCTION')
-      .reduce((sum: number, adjustment: any) => sum + Number(adjustment.amount ?? 0), 0);
-    const otherAllowance = Number(existingPayroll?.otherAllowance ?? adjustmentAllowance);
-    const otherDeduction = Number(existingPayroll?.otherDeduction ?? adjustmentDeduction);
+    const historicalAdjustments = await this.resolveCarriedAdjustments(existingPayroll, salary);
+    const { otherAllowance, otherDeduction } = historicalAdjustments;
     const grossSalary = calc.gross + otherAllowance;
     const deductions = calc.deductions + otherDeduction;
 
@@ -502,7 +516,139 @@ export class PayrollService {
     return {
       data,
       splitMixedLeaveIds: leaveAllocation.splitMixedLeaveIds,
+      historicalAdjustments,
     };
+  }
+
+  /* Allowance and deduction totals a recalculation carries forward.
+     Payrolls created before the component columns were populated
+     (conveyance / otherDeduction NULL) may hold adjustments only in their
+     stored totals or in PayrollAdjustment rows the columns never reflected.
+     Amounts the stored figures prove are carried; anything they cannot
+     explain blocks recalculation instead of being guessed or dropped. */
+  private async resolveCarriedAdjustments(existingPayroll: any, currentSalary: any) {
+    const issues: HistoricalAdjustmentIssue[] = [];
+    if (!existingPayroll) {
+      return { legacyRecord: false, otherAllowance: 0, otherDeduction: 0, recordedAllowance: 0, recordedDeduction: 0, issues };
+    }
+
+    const recorded = (type: 'ALLOWANCE' | 'DEDUCTION') => (existingPayroll.others ?? [])
+      .filter((adjustment: any) => adjustment.type === type)
+      .reduce((sum: number, adjustment: any) => sum + Number(adjustment.amount ?? 0), 0);
+    const recordedAllowance = recorded('ALLOWANCE');
+    const recordedDeduction = recorded('DEDUCTION');
+    const matches = (left: number, right: number) => Math.abs(left - right) <= LEGACY_ROUNDING_TOLERANCE;
+
+    /* Deductions: a stored otherDeduction is authoritative (current behaviour).
+       Without one, the stored total minus its components is what was deducted,
+       the same rule addOther() and the payslip already apply. */
+    let otherDeduction: number;
+    if (existingPayroll.otherDeduction !== null && existingPayroll.otherDeduction !== undefined) {
+      otherDeduction = Number(existingPayroll.otherDeduction);
+    } else {
+      const storedResidual = Number(existingPayroll.deductions ?? 0)
+        - Number(existingPayroll.pf ?? 0)
+        - Number(existingPayroll.pt ?? 0)
+        - Number(existingPayroll.leaveDeduction ?? 0);
+
+      if (recordedDeduction > 0) {
+        // Recorded rows are only trusted when the stored total actually deducted them
+        otherDeduction = recordedDeduction;
+        if (!matches(storedResidual, recordedDeduction)) {
+          issues.push({
+            code: 'DEDUCTION_RECORDS_MISMATCH',
+            blocking: true,
+            message: `Recorded deduction adjustments (${recordedDeduction}) do not match the deductions stored on this payroll (${storedResidual}). Reconcile them manually before recalculating.`,
+            amount: storedResidual - recordedDeduction,
+          });
+        }
+      } else if (matches(storedResidual, 0)) {
+        // Rounding difference of the old calculation, not an adjustment
+        otherDeduction = 0;
+      } else if (storedResidual > 0) {
+        otherDeduction = storedResidual;
+        issues.push({
+          code: 'LEGACY_DEDUCTION_CARRIED',
+          blocking: false,
+          message: `A deduction of ${storedResidual} stored only in this payroll's totals is carried forward as other deductions. It may include up to ${LEGACY_ROUNDING_TOLERANCE} of old rounding.`,
+          amount: storedResidual,
+        });
+      } else {
+        otherDeduction = 0;
+        issues.push({
+          code: 'DEDUCTIONS_BELOW_COMPONENTS',
+          blocking: true,
+          message: `Stored deductions are ${-storedResidual} lower than PF, PT and leave deduction combined. Reconcile this payroll manually before recalculating.`,
+          amount: storedResidual,
+        });
+      }
+    }
+
+    /* Allowances: current payrolls keep the stored otherAllowance. Legacy
+       payrolls (conveyance NULL) are checked against the salary they were
+       calculated on: every rupee of stored gross above it must be explained
+       by recorded allowance rows. */
+    let otherAllowance = Number(existingPayroll.otherAllowance ?? recordedAllowance);
+    const legacyRecord = existingPayroll.conveyance === null;
+
+    if (legacyRecord) {
+      const legacySalary = existingPayroll.salaryId === currentSalary?.id
+        ? currentSalary
+        : await this.prisma.employeeSalary.findUnique({ where: { id: existingPayroll.salaryId } });
+
+      if (!legacySalary) {
+        issues.push({
+          code: 'LEGACY_SALARY_MISSING',
+          blocking: true,
+          message: 'The salary this payroll was calculated on no longer exists, so its stored allowances cannot be verified. Reconcile this payroll manually before recalculating.',
+          amount: 0,
+        });
+      } else {
+        // Payrolls of this era were calculated on monthlyCTC
+        const grossAboveSalary = Number(existingPayroll.grossSalary ?? 0) - Math.round(Number(legacySalary.monthlyCTC ?? 0));
+
+        if (matches(grossAboveSalary, recordedAllowance)) {
+          if (recordedAllowance - otherAllowance > LEGACY_ROUNDING_TOLERANCE) {
+            issues.push({
+              code: 'LEGACY_ALLOWANCE_RECORDS_CARRIED',
+              blocking: false,
+              message: `Allowance adjustments of ${recordedAllowance - otherAllowance} recorded on this payroll but missing from its other allowance are carried forward.`,
+              amount: recordedAllowance - otherAllowance,
+            });
+          }
+          otherAllowance = recordedAllowance;
+        } else {
+          const unexplained = grossAboveSalary - recordedAllowance;
+          issues.push({
+            code: 'UNEXPLAINED_LEGACY_GROSS',
+            blocking: true,
+            message: unexplained > 0
+              ? `This payroll's stored gross includes ${unexplained} that no allowance record explains, most likely an allowance added before allowance records were kept. Recalculation stays blocked until the amount is confirmed and recorded as a historical adjustment through the authorized payroll data-reconciliation process. Do not re-enter it with + Adjust, which would count it twice.`
+              : `Recorded allowance adjustments exceed this payroll's stored gross by ${-unexplained}, so they were never applied. Recalculation stays blocked until they are reconciled through the authorized payroll data-reconciliation process.`,
+            amount: unexplained,
+          });
+        }
+      }
+    } else if (recordedAllowance - otherAllowance > LEGACY_ROUNDING_TOLERANCE) {
+      // Already lost by an earlier recalculation; the current amount is kept as before
+      issues.push({
+        code: 'ALLOWANCE_RECORDS_NOT_REFLECTED',
+        blocking: false,
+        message: `Allowance adjustments of ${recordedAllowance - otherAllowance} are recorded but not included in this payroll. They were not paid by the previous calculation and need manual reconciliation.`,
+        amount: recordedAllowance - otherAllowance,
+      });
+    }
+
+    return { legacyRecord, otherAllowance, otherDeduction, recordedAllowance, recordedDeduction, issues };
+  }
+
+  private assertNoBlockingAdjustmentIssues(issues: HistoricalAdjustmentIssue[]) {
+    const blocking = issues.filter((issue) => issue.blocking);
+    if (blocking.length) {
+      throw new BadRequestException(
+        `Payroll cannot be recalculated safely: ${blocking.map((issue) => issue.message).join(' ')}`,
+      );
+    }
   }
 
   /* HR UPDATE */
